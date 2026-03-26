@@ -132,11 +132,17 @@ class Database:
 
     async def update_bot_status(self, user_id: str, status: str,
                                  markets: List[str], error: str = None):
+        import json
+
         pool = await self._get_pool()
+
+        # Make active_markets safe for the DB driver (json/list mismatch in some schemas).
+        active_markets = json.dumps(markets)
+
         await pool.execute(
             """INSERT INTO bot_statuses (user_id, status, active_markets, updated_at)
                VALUES ($1,$2,$3,$4)
                ON CONFLICT (user_id) DO UPDATE
                SET status=$2, active_markets=$3, updated_at=$4, error_message=$5""",
-            user_id, status, markets, datetime.utcnow(), error
+            user_id, status, active_markets, datetime.utcnow(), error
         )
