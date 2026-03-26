@@ -4,6 +4,7 @@ import { signOut } from 'next-auth/react'
 import { useQuery } from '@tanstack/react-query'
 import { LogOut, Bell, Menu } from 'lucide-react'
 import { useState } from 'react'
+import { formatDistanceToNowStrict } from 'date-fns'
 import { MobileSidebar } from '@/components/dashboard/sidebar'
 
 interface TopBarProps {
@@ -25,6 +26,8 @@ export function TopBar({ user }: TopBarProps) {
   })
 
   const isRunning = botData?.status === 'running'
+  const botStartedAt = botData?.startedAt ? new Date(botData.startedAt) : null
+  const runTime = botStartedAt ? formatDistanceToNowStrict(botStartedAt, { addSuffix: false }) : null
 
   // ✅ Safe user values
   const displayName =
@@ -64,6 +67,9 @@ export function TopBar({ user }: TopBarProps) {
           <span className="text-gray-500">
             · {botData.activeMarkets.join(', ')}
           </span>
+        )}
+        {isRunning && runTime && (
+          <span className="text-gray-400">· up {runTime}</span>
         )}
       </div>
 

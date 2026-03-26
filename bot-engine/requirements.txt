@@ -9,6 +9,7 @@ asyncpg==0.29.0
 sqlalchemy==2.0.31
 python-dotenv==1.0.1
 cryptography==42.0.8
+pycryptodome==3.19.0
 httpx==0.27.0
 websockets==12.0
 pydantic==2.7.4
