@@ -18,27 +18,38 @@ def _get_fernet() -> Fernet:
     return Fernet(fernet_key)
 
 def decrypt_field(ciphertext: str) -> str:
-    """Decrypt AES-encrypted field stored by Next.js backend."""
-    # Next.js uses crypto-js AES — we use a compatible Python approach
-    # Both sides use the same ENCRYPTION_KEY from .env
-    from Crypto.Cipher import AES
-    import base64, json
-    key = os.getenv("ENCRYPTION_KEY", "").encode()[:32]
-    # crypto-js output is base64(OpenSSL salted format)
-    raw = base64.b64decode(ciphertext)
-    if raw[:8] == b'Salted__':
-        salt = raw[8:16]
-        data = raw[16:]
-        d, d_i = b'', b''
-        while len(d) < 48:
-            d_i = hashlib.md5(d_i + key + salt).digest()
-            d += d_i
-        aes_key, iv = d[:32], d[32:48]
-        cipher = AES.new(aes_key, AES.MODE_CBC, iv)
-        decrypted = cipher.decrypt(data)
-        pad = decrypted[-1]
-        return decrypted[:-pad].decode('utf-8')
-    return ciphertext
+    try:
+        from Cryptodome.Cipher import AES
+        import base64, hashlib
+
+        key = os.getenv("ENCRYPTION_KEY", "").encode()[:32]
+
+        if not ciphertext:
+            return None
+
+        raw = base64.b64decode(ciphertext)
+
+        if raw[:8] == b'Salted__':
+            salt = raw[8:16]
+            data = raw[16:]
+
+            d, d_i = b'', b''
+            while len(d) < 48:
+                d_i = hashlib.md5(d_i + key + salt).digest()
+                d += d_i
+
+            aes_key, iv = d[:32], d[32:48]
+            cipher = AES.new(aes_key, AES.MODE_CBC, iv)
+            decrypted = cipher.decrypt(data)
+            pad = decrypted[-1]
+
+            return decrypted[:-pad].decode('utf-8')
+
+        return ciphertext
+
+    except Exception as e:
+        logger.error(f"❌ Decryption failed: {e}")
+        return None
 
 class Database:
     def __init__(self):
