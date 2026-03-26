@@ -5,6 +5,7 @@ from typing import Optional, Dict
 from ta.trend import EMAIndicator, MACD
 from ta.momentum import RSIIndicator
 from ta.volatility import BollingerBands
+from algorithms.base_algo import BaseAlgo
 
 
 from datetime import datetime
