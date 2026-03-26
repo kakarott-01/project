@@ -4,12 +4,33 @@ from pydantic import BaseModel
 from typing import List
 import os
 from dotenv import load_dotenv
+from contextlib import asynccontextmanager
+
 from scheduler import BotScheduler
 
 load_dotenv()
 
+BOT_SECRET = os.getenv("BOT_ENGINE_SECRET", "")
+
+# ✅ GLOBAL scheduler (initialized in lifespan)
+scheduler: BotScheduler | None = None
+
+
+# ── LIFESPAN (FIXES YOUR ISSUE) ──────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global scheduler
+    scheduler = BotScheduler()
+    yield
+    # optional cleanup
+
+
 # ── App Setup ────────────────────────────────────────────────────────────────
-app = FastAPI(title="AlgoBot Engine", version="1.0.0")
+app = FastAPI(
+    title="AlgoBot Engine",
+    version="1.0.0",
+    lifespan=lifespan
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,25 +39,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-scheduler = BotScheduler()
-BOT_SECRET = os.getenv("BOT_ENGINE_SECRET", "")
 
 # ── Auth Helper ──────────────────────────────────────────────────────────────
 def verify_secret(x_bot_secret: str = Header(...)):
     if x_bot_secret != BOT_SECRET:
         raise HTTPException(status_code=401, detail="Invalid bot secret")
 
+
 # ── Models ───────────────────────────────────────────────────────────────────
 class StartRequest(BaseModel):
     user_id: str
     markets: List[str]
 
+
 class StopRequest(BaseModel):
     user_id: str
 
+
 # ── Routes ───────────────────────────────────────────────────────────────────
 
-# ✅ ROOT ROUTE (fixes your 404)
 @app.get("/")
 async def root():
     return {
@@ -45,15 +66,15 @@ async def root():
         "health": "/health"
     }
 
-# ✅ Health Check
+
 @app.get("/health")
 def health():
     return {
         "status": "ok",
-        "running_users": len(scheduler.active_jobs)
+        "running_users": len(scheduler.active_jobs) if scheduler else 0
     }
 
-# ▶️ Start Bot
+
 @app.post("/bot/start")
 async def start_bot(
     req: StartRequest,
@@ -61,6 +82,9 @@ async def start_bot(
     x_bot_secret: str = Header(...)
 ):
     verify_secret(x_bot_secret)
+
+    if not scheduler:
+        raise HTTPException(status_code=500, detail="Scheduler not initialized")
 
     background_tasks.add_task(
         scheduler.start_user_bot,
@@ -74,13 +98,16 @@ async def start_bot(
         "markets": req.markets
     }
 
-# ⏹ Stop Bot
+
 @app.post("/bot/stop")
 async def stop_bot(
     req: StopRequest,
     x_bot_secret: str = Header(...)
 ):
     verify_secret(x_bot_secret)
+
+    if not scheduler:
+        raise HTTPException(status_code=500, detail="Scheduler not initialized")
 
     scheduler.stop_user_bot(req.user_id)
 
@@ -89,10 +116,13 @@ async def stop_bot(
         "user_id": req.user_id
     }
 
-# ⏹ Stop All Bots
+
 @app.post("/bot/stop-all")
 async def stop_all(x_bot_secret: str = Header(...)):
     verify_secret(x_bot_secret)
+
+    if not scheduler:
+        raise HTTPException(status_code=500, detail="Scheduler not initialized")
 
     scheduler.stop_all()
 
@@ -100,7 +130,7 @@ async def stop_all(x_bot_secret: str = Header(...)):
         "status": "all_stopped"
     }
 
-# 📊 Bot Status
+
 @app.get("/bot/status/{user_id}")
 async def bot_status(
     user_id: str,
@@ -108,14 +138,7 @@ async def bot_status(
 ):
     verify_secret(x_bot_secret)
 
-    return scheduler.get_status(user_id)
+    if not scheduler:
+        raise HTTPException(status_code=500, detail="Scheduler not initialized")
 
-# ── Run Server ───────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", 8000)),
-        reload=False
-    )
+    return scheduler.get_status(user_id)
