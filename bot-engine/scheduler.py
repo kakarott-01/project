@@ -21,7 +21,6 @@ ALGO_MAP = {
     "global":      GlobalAlgo,
 }
 
-# How often each market's algo runs (seconds)
 MARKET_INTERVAL = {
     "indian":      60,
     "crypto":      30,
@@ -41,11 +40,6 @@ class BotScheduler:
     # ─────────────────────────────────────────────────────────────────────────
 
     async def recover_running_bots(self):
-        """
-        On process startup, query the DB for any bots that were marked
-        'running' and restart their scheduled jobs automatically.
-        This handles Render free-tier restarts, deploys, and crashes.
-        """
         pool = await self.db._get_pool()
         rows = await pool.fetch(
             "SELECT user_id, active_markets FROM bot_statuses WHERE status = 'running'"
@@ -64,7 +58,6 @@ class BotScheduler:
             if not markets:
                 continue
 
-            # Parse JSON array if stored as string
             import json
             if isinstance(markets, str):
                 try:
@@ -85,8 +78,8 @@ class BotScheduler:
         try:
             logger.info(f"🚀 Starting bot user={user_id} markets={markets}")
 
-            # Stop any existing jobs first (idempotent restart)
-            self.stop_user_bot(user_id)
+            # Stop any existing jobs first (synchronous — no race condition)
+            self._stop_jobs_sync(user_id)
             self.active_jobs[user_id] = []
 
             exchange_configs = await self.db.get_exchange_apis(user_id)
@@ -120,7 +113,7 @@ class BotScheduler:
                         api_key,
                         api_secret,
                         extra,
-                        market_type=market,   # ← passed so connector sets correct trading mode
+                        market_type=market,
                     )
 
                     AlgoClass = ALGO_MAP.get(market, GlobalAlgo)
@@ -159,34 +152,41 @@ class BotScheduler:
 
     # ─────────────────────────────────────────────────────────────────────────
 
-    def stop_user_bot(self, user_id: str):
+    def _stop_jobs_sync(self, user_id: str):
+        """
+        Synchronously remove all APScheduler jobs for a user.
+        Does NOT update DB — caller is responsible for that.
+        """
+        jobs = self.active_jobs.get(user_id, [])
+        for job_id in jobs:
+            try:
+                self.scheduler.remove_job(job_id)
+                logger.info(f"🛑 Removed job {job_id}")
+            except Exception:
+                pass  # Job may have already completed or been removed
+        self.active_jobs.pop(user_id, None)
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def stop_user_bot(self, user_id: str):
+        """
+        Async stop: removes jobs synchronously, then awaits DB update.
+        Call this from async contexts (e.g. FastAPI route handler).
+        """
         try:
-            jobs = self.active_jobs.get(user_id, [])
-
-            for job_id in jobs:
-                try:
-                    self.scheduler.remove_job(job_id)
-                    logger.info(f"🛑 Removed job {job_id}")
-                except Exception:
-                    pass  # Job may have already been removed
-
-            self.active_jobs.pop(user_id, None)
-
-            asyncio.create_task(
-                self.db.update_bot_status(user_id, "stopped", [])
-            )
-
+            self._stop_jobs_sync(user_id)
+            # Await DB update directly — no fire-and-forget task
+            await self.db.update_bot_status(user_id, "stopped", [])
             logger.info(f"🛑 Bot stopped for user={user_id}")
-
         except Exception as e:
             logger.error(f"❌ stop_user_bot error: {e}", exc_info=True)
 
     # ─────────────────────────────────────────────────────────────────────────
 
-    def stop_all(self):
+    async def stop_all(self):
         logger.info("🛑 Stopping all bots")
         for user_id in list(self.active_jobs.keys()):
-            self.stop_user_bot(user_id)
+            await self.stop_user_bot(user_id)
 
     # ─────────────────────────────────────────────────────────────────────────
 

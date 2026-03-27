@@ -27,8 +27,6 @@ async def lifespan(app: FastAPI):
     global scheduler
     scheduler = BotScheduler()
 
-    # ── On startup: recover any bots that were "running" when the
-    #    process last died (Render free-tier restarts, deploys, etc.)
     try:
         await scheduler.recover_running_bots()
     except Exception as e:
@@ -36,9 +34,9 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Graceful shutdown
+    # Graceful shutdown — await properly
     if scheduler:
-        scheduler.stop_all()
+        await scheduler.stop_all()
 
 
 app = FastAPI(title="AlgoBot Engine", version="1.0.0", lifespan=lifespan)
@@ -51,14 +49,10 @@ app.add_middleware(
 )
 
 
-# ── Auth helper ───────────────────────────────────────────────────────────────
-
 def verify_secret(x_bot_secret: str = Header(...)):
     if x_bot_secret != BOT_SECRET:
         raise HTTPException(status_code=401, detail="Invalid bot secret")
 
-
-# ── Models ────────────────────────────────────────────────────────────────────
 
 class StartRequest(BaseModel):
     user_id: str
@@ -68,8 +62,6 @@ class StartRequest(BaseModel):
 class StopRequest(BaseModel):
     user_id: str
 
-
-# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/")
 async def root():
@@ -84,13 +76,6 @@ def health():
 
 @app.post("/bot/start")
 async def start_bot(req: StartRequest, x_bot_secret: str = Header(...)):
-    """
-    Starts the bot synchronously (no BackgroundTasks).
-    BackgroundTasks was causing a race: the job was scheduled *after*
-    the response, but if the process was spinning up the task could
-    be lost entirely.  Awaiting directly is safe here — the heavy work
-    (DB query, ccxt init) takes < 2 s.
-    """
     verify_secret(x_bot_secret)
 
     if not scheduler:
@@ -112,7 +97,8 @@ async def stop_bot(req: StopRequest, x_bot_secret: str = Header(...)):
     if not scheduler:
         raise HTTPException(status_code=500, detail="Scheduler not initialized")
 
-    scheduler.stop_user_bot(req.user_id)
+    # ✅ FIX: await the async stop (was sync before, causing race condition)
+    await scheduler.stop_user_bot(req.user_id)
     return {"status": "stopped", "user_id": req.user_id}
 
 
@@ -123,7 +109,7 @@ async def stop_all(x_bot_secret: str = Header(...)):
     if not scheduler:
         raise HTTPException(status_code=500, detail="Scheduler not initialized")
 
-    scheduler.stop_all()
+    await scheduler.stop_all()
     return {"status": "all_stopped"}
 
 

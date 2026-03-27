@@ -1,7 +1,7 @@
 'use client'
 
-import { useState } from 'react'
-import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query'
+import { useState, useRef } from 'react'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Play, Square, AlertTriangle, Loader2 } from 'lucide-react'
 
 const MARKETS = [
@@ -15,6 +15,9 @@ export function BotControls({ botData }: { botData: any }) {
   const qc = useQueryClient()
   const [selectedMarkets, setSelected] = useState<string[]>(['crypto'])
   const [actionError, setActionError]  = useState<string | null>(null)
+
+  // ✅ FIX: Ref-based guard so rapid clicks can't fire multiple mutations
+  const isFiringRef = useRef(false)
 
   const isRunning = botData?.status === 'running'
 
@@ -32,7 +35,6 @@ export function BotControls({ botData }: { botData: any }) {
     },
     onMutate: async () => {
       setActionError(null)
-      // Optimistically flip the status pill to "running" immediately
       await qc.cancelQueries({ queryKey: ['bot-status'] })
       const prev = qc.getQueryData(['bot-status'])
       qc.setQueryData(['bot-status'], (old: any) => ({
@@ -44,11 +46,11 @@ export function BotControls({ botData }: { botData: any }) {
       return { prev }
     },
     onError: (err: Error, _vars, ctx) => {
-      // Roll back the optimistic update
       if (ctx?.prev) qc.setQueryData(['bot-status'], ctx.prev)
       setActionError(err.message)
     },
     onSettled: () => {
+      isFiringRef.current = false
       qc.invalidateQueries({ queryKey: ['bot-status'] })
     },
   })
@@ -63,7 +65,6 @@ export function BotControls({ botData }: { botData: any }) {
     },
     onMutate: async () => {
       setActionError(null)
-      // Optimistically flip to "stopped" so the button disables immediately
       await qc.cancelQueries({ queryKey: ['bot-status'] })
       const prev = qc.getQueryData(['bot-status'])
       qc.setQueryData(['bot-status'], (old: any) => ({
@@ -78,6 +79,7 @@ export function BotControls({ botData }: { botData: any }) {
       setActionError(err.message)
     },
     onSettled: () => {
+      isFiringRef.current = false
       qc.invalidateQueries({ queryKey: ['bot-status'] })
     },
   })
@@ -86,6 +88,18 @@ export function BotControls({ botData }: { botData: any }) {
     setSelected(prev =>
       prev.includes(id) ? prev.filter(m => m !== id) : [...prev, id]
     )
+  }
+
+  function handleStart() {
+    if (isFiringRef.current || startMut.isPending || stopMut.isPending) return
+    isFiringRef.current = true
+    startMut.mutate()
+  }
+
+  function handleStop() {
+    if (isFiringRef.current || startMut.isPending || stopMut.isPending) return
+    isFiringRef.current = true
+    stopMut.mutate()
   }
 
   const isBusy = startMut.isPending || stopMut.isPending
@@ -126,11 +140,7 @@ export function BotControls({ botData }: { botData: any }) {
       <div className="flex gap-2">
         {isRunning ? (
           <button
-            onClick={() => {
-              // Guard against double-click — if already pending, do nothing
-              if (isBusy) return
-              stopMut.mutate()
-            }}
+            onClick={handleStop}
             disabled={isBusy}
             className={`btn-danger flex items-center gap-1.5 transition-opacity ${
               isBusy ? 'opacity-60 cursor-not-allowed' : ''
@@ -144,10 +154,7 @@ export function BotControls({ botData }: { botData: any }) {
           </button>
         ) : (
           <button
-            onClick={() => {
-              if (isBusy) return
-              startMut.mutate()
-            }}
+            onClick={handleStart}
             disabled={isBusy || selectedMarkets.length === 0}
             className={`btn-primary flex items-center gap-1.5 transition-opacity ${
               isBusy || selectedMarkets.length === 0 ? 'opacity-60 cursor-not-allowed' : ''
