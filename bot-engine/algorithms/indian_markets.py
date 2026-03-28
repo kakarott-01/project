@@ -1,17 +1,16 @@
 import pandas as pd
 import logging
 from typing import Optional, Dict
-
-from ta.trend import EMAIndicator, MACD
-from ta.momentum import RSIIndicator
-from ta.volatility import BollingerBands
-from algorithms.base_algo import BaseAlgo
-
-
 from datetime import datetime
 import pytz
 
+from ta.trend import EMAIndicator
+from ta.momentum import RSIIndicator
+from algorithms.base_algo import BaseAlgo
+
+logger = logging.getLogger(__name__)
 IST = pytz.timezone("Asia/Kolkata")
+
 
 class IndianMarketsAlgo(BaseAlgo):
 
@@ -22,24 +21,22 @@ class IndianMarketsAlgo(BaseAlgo):
     def config_filename(self) -> str:
         return "indian_markets.json"
 
-    def get_symbols(self) -> list[str]:
+    def get_symbols(self) -> list:
         return self.config.get("symbols", ["RELIANCE"])
 
     def _is_trading_time(self):
         now = datetime.now(IST).strftime("%H:%M")
-
         if now >= "15:15":
-            return False, True
+            return False, True   # square-off time
         if now < "09:20":
-            return False, False
-
+            return False, False  # pre-market
         return True, False
 
     async def generate_signal(self, symbol: str) -> Optional[str]:
         can_trade, square_off = self._is_trading_time()
 
         if square_off:
-            return "sell"
+            return "SELL"   # force close all at end of day
         if not can_trade:
             return None
 
@@ -49,8 +46,8 @@ class IndianMarketsAlgo(BaseAlgo):
 
         df["ema_fast"] = EMAIndicator(df["close"], window=9).ema_indicator()
         df["ema_slow"] = EMAIndicator(df["close"], window=21).ema_indicator()
-        df["rsi"] = RSIIndicator(df["close"], window=14).rsi()
-        df["vol_avg"] = df["volume"].rolling(20).mean()
+        df["rsi"]      = RSIIndicator(df["close"], window=14).rsi()
+        df["vol_avg"]  = df["volume"].rolling(20).mean()
 
         curr = df.iloc[-1]
         prev = df.iloc[-2]
@@ -58,15 +55,12 @@ class IndianMarketsAlgo(BaseAlgo):
         if any(pd.isna([curr["ema_fast"], curr["ema_slow"], curr["rsi"]])):
             return None
 
-        cross_up = prev["ema_fast"] <= prev["ema_slow"] and curr["ema_fast"] > curr["ema_slow"]
+        cross_up   = prev["ema_fast"] <= prev["ema_slow"] and curr["ema_fast"] > curr["ema_slow"]
         cross_down = prev["ema_fast"] >= prev["ema_slow"] and curr["ema_fast"] < curr["ema_slow"]
+        vol_spike  = curr["volume"] > curr["vol_avg"] * 1.5
 
-        volume_spike = curr["volume"] > curr["vol_avg"] * 1.5
-
-        if cross_up and curr["rsi"] > 50 and volume_spike:
-            return "buy"
-
+        if cross_up and curr["rsi"] > 50 and vol_spike:
+            return "BUY"
         if cross_down and curr["rsi"] < 50:
-            return "sell"
-
+            return "SELL"
         return None
