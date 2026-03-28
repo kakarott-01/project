@@ -478,7 +478,7 @@ function ExchangeForm({ exch, marketId, prefill, onSaved, onCancel, isEdit }: Ex
   );
 }
 
-// ── Exchange row (collapsed by default, expandable) ───────────────────────────
+// ── Exchange row ──────────────────────────────────────────────────────────────
 
 interface ExchangeRowProps {
   exch: { id: string; name: string; fields: string[]; docs: string };
@@ -499,11 +499,8 @@ function ExchangeRow({
 }: ExchangeRowProps) {
   const key = `${market.id}_${exch.id}`;
   const isEditing = editingKey === key;
-
-  // Only open if actively editing
   const [formOpen, setFormOpen] = useState(false);
 
-  // If editing (from OTP verify flow), force open
   if (isEditing) {
     return (
       <ExchangeForm
@@ -521,7 +518,6 @@ function ExchangeRow({
     return <ConnectedCard exch={exch} market={market} userEmail={userEmail} onEdit={onEditOtpModal} />;
   }
 
-  // Not saved — show collapsed row with expand button
   return (
     <div className="bg-gray-800/40 rounded-xl border border-gray-700/50 overflow-hidden">
       <button
@@ -544,7 +540,7 @@ function ExchangeRow({
           </a>
           <div className="flex items-center gap-1 text-xs text-gray-500">
             {formOpen ? (
-              <><ChevronUp className="w-3.5 h-3.5" /></>
+              <ChevronUp className="w-3.5 h-3.5" />
             ) : (
               <><Plus className="w-3.5 h-3.5" /> Connect</>
             )}
@@ -571,6 +567,7 @@ function ExchangeRow({
 
 export default function MarketsPage() {
   const qc = useQueryClient();
+  // ✅ FIX: Start with null — no market expanded by default on page visit
   const [expanded, setExpanded]           = useState<string | null>(null);
   const [editingKey, setEditingKey]       = useState<string | null>(null);
   const [editPrefill, setEditPrefill]     = useState<RevealedKeys | null>(null);
@@ -592,16 +589,8 @@ export default function MarketsPage() {
     return existingApis?.some(a => a.marketType === marketId && a.exchangeName === exchId);
   }
 
-  // Auto-expand markets that have a saved connection
-  useEffect(() => {
-    if (!existingApis) return;
-    for (const market of MARKETS) {
-      if (market.exchanges.some(e => isSaved(market.id, e.id))) {
-        setExpanded(market.id);
-        return;
-      }
-    }
-  }, [existingApis]);
+  // ✅ FIX: Removed the useEffect that was auto-expanding markets on page visit.
+  // Users now manually click to expand any market they want.
 
   async function handleEditOtpVerified(marketId: string, exchId: string) {
     setEditOtpModal(null);

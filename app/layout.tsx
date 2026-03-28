@@ -8,6 +8,16 @@ const inter = Inter({ subsets: ['latin'] })
 export const metadata: Metadata = {
   title: 'AlgoBot — Automated Trading',
   description: 'Personal algorithmic trading bot',
+  icons: {
+    icon: [
+      { url: '/icon.svg', type: 'image/svg+xml' },
+    ],
+    apple: [
+      { url: '/apple-icon.svg', type: 'image/svg+xml' },
+    ],
+    shortcut: '/icon.svg',
+  },
+  manifest: '/manifest.json',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

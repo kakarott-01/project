@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Dark background with rounded corners -->
+  <rect width="512" height="512" rx="110" fill="#030712"/>
+
+  <!-- Subtle grid lines for trading feel -->
+  <line x1="0" y1="170" x2="512" y2="170" stroke="#1D9E75" stroke-width="1" stroke-opacity="0.08"/>
+  <line x1="0" y1="340" x2="512" y2="340" stroke="#1D9E75" stroke-width="1" stroke-opacity="0.08"/>
+  <line x1="170" y1="0" x2="170" y2="512" stroke="#1D9E75" stroke-width="1" stroke-opacity="0.08"/>
+  <line x1="340" y1="0" x2="340" y2="512" stroke="#1D9E75" stroke-width="1" stroke-opacity="0.08"/>
+
+  <!-- Glow effect behind chart line -->
+  <polyline points="72,390 180,275 258,318 358,185 440,110"
+    fill="none" stroke="#1D9E75" stroke-width="52" stroke-linecap="round"
+    stroke-linejoin="round" stroke-opacity="0.12"/>
+
+  <!-- Main chart line -->
+  <polyline points="72,390 180,275 258,318 358,185 440,110"
+    fill="none" stroke="#1D9E75" stroke-width="26" stroke-linecap="round"
+    stroke-linejoin="round"/>
+
+  <!-- Arrow arm (up) -->
+  <line x1="440" y1="110" x2="370" y2="110"
+    stroke="#1D9E75" stroke-width="26" stroke-linecap="round"/>
+  <!-- Arrow arm (right-down) -->
+  <line x1="440" y1="110" x2="440" y2="180"
+    stroke="#1D9E75" stroke-width="26" stroke-linecap="round"/>
+
+  <!-- Glowing end dot -->
+  <circle cx="440" cy="110" r="22" fill="#1D9E75" opacity="0.3"/>
+  <circle cx="440" cy="110" r="14" fill="#1D9E75"/>
+
+  <!-- Small base line (x-axis) -->
+  <line x1="60" y1="418" x2="452" y2="418"
+    stroke="#1D9E75" stroke-width="6" stroke-linecap="round" stroke-opacity="0.3"/>
+</svg>

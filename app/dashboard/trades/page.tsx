@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Filter, Trash2, CheckSquare, Square, AlertTriangle,
   X, ArrowUpRight, ArrowDownRight, RefreshCw, Download,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, TrendingUp, TrendingDown, Activity,
 } from 'lucide-react'
 import { format } from 'date-fns'
 
@@ -99,7 +99,6 @@ function Paginator({ pagination, onPage }: { pagination: Pagination; onPage: (p:
   const start = (page - 1) * limit + 1
   const end   = Math.min(page * limit, total)
 
-  // Show window of 5 pages around current
   const pageNums: number[] = []
   const half = 2
   let lo = Math.max(1, page - half)
@@ -155,6 +154,28 @@ function Paginator({ pagination, onPage }: { pagination: Pagination; onPage: (p:
   )
 }
 
+// ─── Stat Card — matches Bot History style, mobile-friendly ──────────────────
+function StatCard({
+  label, value, sub, color, icon: Icon,
+}: {
+  label: string
+  value: string | number
+  sub: string
+  color: string
+  icon: React.ElementType
+}) {
+  return (
+    <div className="bg-gray-900/80 border border-gray-800 rounded-xl p-4 flex flex-col gap-1 min-w-0">
+      <div className="flex items-center justify-between mb-0.5">
+        <span className="text-xs font-medium text-gray-500 uppercase tracking-wide leading-none">{label}</span>
+        <Icon className="w-3.5 h-3.5 text-gray-700 flex-shrink-0" />
+      </div>
+      <span className={`text-2xl font-bold leading-tight truncate ${color}`}>{value}</span>
+      <span className="text-xs text-gray-600 leading-none">{sub}</span>
+    </div>
+  )
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function TradesPage() {
   const qc = useQueryClient()
@@ -168,7 +189,6 @@ export default function TradesPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [confirm,  setConfirm]  = useState<null | { type: string; label: string; message: string }>(null)
 
-  // Reset to page 1 whenever any filter changes
   function applyFilter(fn: () => void) {
     fn()
     setPage(1)
@@ -232,7 +252,7 @@ export default function TradesPage() {
 
   const isBusy = bulkDelete.isPending || deleteSingle.isPending
 
-  // ── Filter pill component ──────────────────────────────────────────────────
+  // ── Filter pill ────────────────────────────────────────────────────────────
   const Pill = ({ value, active, onClick, label }: { value: string; active: boolean; onClick: () => void; label?: string }) => (
     <button onClick={onClick}
       className={`px-3 py-1 text-xs rounded-lg border capitalize transition-colors ${
@@ -308,21 +328,32 @@ export default function TradesPage() {
         </div>
       </div>
 
-      {/* Summary — scoped to current filters */}
-      <div className="grid grid-cols-3 gap-3">
-        {[
-          { label: 'Total P&L',   value: `₹${summary.totalPnl.toFixed(2)}`,  color: summary.totalPnl >= 0 ? 'pnl-positive' : 'pnl-negative' },
-          { label: 'Win Rate',    value: `${summary.winRate}%`,                color: summary.winRate >= 50   ? 'pnl-positive' : 'pnl-negative' },
-          { label: 'Total Trades',value: summary.total.toLocaleString(),        color: 'text-gray-200' },
-        ].map(c => (
-          <div key={c.label} className="stat-card">
-            <span className="stat-label">{c.label}</span>
-            <span className={`text-xl font-semibold ${c.color}`}>{c.value}</span>
-            {c.label === 'Win Rate' && (
-              <span className="stat-sub">{summary.closed} closed trades</span>
-            )}
-          </div>
-        ))}
+      {/* ✅ IMPROVED: Summary stat cards — mobile-first 2-col, desktop 3-col */}
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+        <StatCard
+          label="Total P&L"
+          value={`₹${summary.totalPnl.toFixed(2)}`}
+          sub="all closed trades"
+          color={summary.totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}
+          icon={summary.totalPnl >= 0 ? TrendingUp : TrendingDown}
+        />
+        <StatCard
+          label="Win Rate"
+          value={`${summary.winRate}%`}
+          sub={`${summary.closed} closed trades`}
+          color={summary.winRate >= 50 ? 'text-emerald-400' : 'text-red-400'}
+          icon={Activity}
+        />
+        {/* Full-width on mobile, normal on desktop */}
+        <div className="col-span-2 lg:col-span-1">
+          <StatCard
+            label="Total Trades"
+            value={summary.total.toLocaleString()}
+            sub="matching current filters"
+            color="text-gray-200"
+            icon={Filter}
+          />
+        </div>
       </div>
 
       {/* Bulk action bar */}
@@ -342,7 +373,7 @@ export default function TradesPage() {
             </>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <button onClick={() => setConfirm({ type: 'paper', label: 'Delete Paper Trades', message: 'Delete ALL paper trades? This cannot be undone.' })}
             disabled={isBusy}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-400 bg-amber-900/15 hover:bg-amber-900/25 border border-amber-900/30 rounded-lg transition-colors disabled:opacity-40">
