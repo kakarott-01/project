@@ -37,6 +37,27 @@ class BotScheduler:
         self.scheduler.start()
         logger.info("✅ BotScheduler started")
 
+    # ── NEW: Close stale sessions on startup ───────────────────────────────────
+    # When Render kills the process, sessions are left as "running" in the DB.
+    # This resets them so the UI shows correct state immediately.
+    async def cleanup_stale_sessions(self):
+        pool = await self.db._get_pool()
+
+        # Mark all running sessions as stopped since the engine just (re)started
+        result = await pool.execute(
+            """UPDATE bot_sessions
+               SET status = 'stopped', ended_at = NOW()
+               WHERE status = 'running'"""
+        )
+        logger.info(f"🧹 Startup cleanup: reset stale running sessions")
+
+        # Also ensure bot_statuses reflects stopped state
+        await pool.execute(
+            """UPDATE bot_statuses
+               SET status = 'stopped', updated_at = NOW()
+               WHERE status = 'running'"""
+        )
+
     # ─────────────────────────────────────────────────────────────────────────
 
     async def recover_running_bots(self):
@@ -78,7 +99,7 @@ class BotScheduler:
         try:
             logger.info(f"🚀 Starting bot user={user_id} markets={markets}")
 
-            # Stop any existing jobs first (synchronous — no race condition)
+            # Stop any existing jobs first
             self._stop_jobs_sync(user_id)
             self.active_jobs[user_id] = []
 
@@ -86,10 +107,6 @@ class BotScheduler:
             risk_cfg         = await self.db.get_risk_settings(user_id)
             risk_mgr         = RiskManager(risk_cfg)
 
-            # ── KEY FIX: read paper_mode from DB, not from JSON config files ──
-            # This is the authoritative source of truth for trade execution mode.
-            # market_modes = { "crypto": True, "indian": False, ... }
-            # True = paper (simulate), False = live (real orders)
             market_modes = await self.db.get_market_modes(user_id)
             logger.info(f"📋 Market modes from DB: {market_modes}")
 
@@ -123,10 +140,7 @@ class BotScheduler:
                         market_type=market,
                     )
 
-                    AlgoClass = ALGO_MAP.get(market, GlobalAlgo)
-
-                    # ── PASS paper_mode EXPLICITLY from DB ────────────────────
-                    # Falls back to True (paper) if not found in DB — safe default.
+                    AlgoClass  = ALGO_MAP.get(market, GlobalAlgo)
                     paper_mode = market_modes.get(market, True)
 
                     logger.info(
@@ -139,7 +153,7 @@ class BotScheduler:
                         risk_mgr,
                         self.db,
                         user_id,
-                        paper_mode=paper_mode,  # explicit DB-sourced flag
+                        paper_mode=paper_mode,
                     )
 
                     interval = MARKET_INTERVAL.get(market, 60)

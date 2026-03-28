@@ -27,6 +27,15 @@ async def lifespan(app: FastAPI):
     global scheduler
     scheduler = BotScheduler()
 
+    # ── On startup: mark any sessions the DB thinks are running as stopped ──
+    # This handles the case where Render killed the process mid-run.
+    # The Next.js cleanup endpoint also does this from the frontend side,
+    # but doing it here ensures it's also done before any new bot starts.
+    try:
+        await scheduler.cleanup_stale_sessions()
+    except Exception as e:
+        logger.warning(f"⚠️  Startup cleanup failed (non-fatal): {e}")
+
     try:
         await scheduler.recover_running_bots()
     except Exception as e:
@@ -34,7 +43,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Graceful shutdown — await properly
+    # Graceful shutdown
     if scheduler:
         await scheduler.stop_all()
 
@@ -81,6 +90,11 @@ async def start_bot(req: StartRequest, x_bot_secret: str = Header(...)):
     if not scheduler:
         raise HTTPException(status_code=500, detail="Scheduler not initialized")
 
+    # Guard: don't start if already running for this user
+    if req.user_id in scheduler.active_jobs and scheduler.active_jobs[req.user_id]:
+        logger.info(f"Bot already running for user={req.user_id}, skipping duplicate start")
+        return {"status": "already_running", "user_id": req.user_id, "markets": req.markets}
+
     try:
         await scheduler.start_user_bot(req.user_id, req.markets)
     except Exception as e:
@@ -97,7 +111,6 @@ async def stop_bot(req: StopRequest, x_bot_secret: str = Header(...)):
     if not scheduler:
         raise HTTPException(status_code=500, detail="Scheduler not initialized")
 
-    # ✅ FIX: await the async stop (was sync before, causing race condition)
     await scheduler.stop_user_bot(req.user_id)
     return {"status": "stopped", "user_id": req.user_id}
 

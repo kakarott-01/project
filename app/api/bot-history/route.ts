@@ -10,10 +10,10 @@ export async function GET(req: NextRequest) {
   if (!session?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { searchParams } = new URL(req.url)
-  const mode     = searchParams.get('mode')      // paper | live
+  const mode     = searchParams.get('mode')
   const exchange = searchParams.get('exchange')
-  const from     = searchParams.get('from')       // ISO date string
-  const to       = searchParams.get('to')         // ISO date string
+  const from     = searchParams.get('from')
+  const to       = searchParams.get('to')
   const page     = Math.max(1, Number(searchParams.get('page') ?? 1))
   const limit    = Math.min(Number(searchParams.get('limit') ?? 20), 100)
   const offset   = (page - 1) * limit
@@ -36,8 +36,37 @@ export async function GET(req: NextRequest) {
       .where(and(...conditions)),
   ])
 
+  // For "running" sessions, fetch live trade count on the fly
+  // so the table always shows fresh numbers even while bot is active
+  const enriched = await Promise.all(rows.map(async (s) => {
+    if (s.status !== 'running') return s
+
+    const stats = await db
+      .select({
+        total:  sql<number>`count(*)::int`,
+        open:   sql<number>`count(*) filter (where status = 'open')::int`,
+        closed: sql<number>`count(*) filter (where status = 'closed')::int`,
+        pnl:    sql<number>`coalesce(sum(pnl) filter (where status = 'closed'), 0)::float`,
+      })
+      .from(trades)
+      .where(and(
+        eq(trades.userId, session.id),
+        eq(trades.marketType, s.market as any),
+        sql`${trades.openedAt} >= ${s.startedAt}`,
+      ))
+
+    const row = stats[0]
+    return {
+      ...s,
+      totalTrades:  row?.total  ?? 0,
+      openTrades:   row?.open   ?? 0,
+      closedTrades: row?.closed ?? 0,
+      totalPnl:     String(row?.pnl ?? 0),
+    }
+  }))
+
   return NextResponse.json({
-    sessions: rows,
+    sessions: enriched,
     pagination: {
       page,
       limit,

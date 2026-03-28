@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Play, Square, AlertTriangle, Loader2 } from 'lucide-react'
 
@@ -16,10 +16,17 @@ export function BotControls({ botData }: { botData: any }) {
   const [selectedMarkets, setSelected] = useState<string[]>(['crypto'])
   const [actionError, setActionError]  = useState<string | null>(null)
 
-  // ✅ FIX: Ref-based guard so rapid clicks can't fire multiple mutations
+  // Single-flight ref: blocks any second click until the mutation settles
   const isFiringRef = useRef(false)
 
   const isRunning = botData?.status === 'running'
+
+  // ── Run cleanup once on mount to fix stale sessions from crashes ───────────
+  useEffect(() => {
+    fetch('/api/bot/cleanup', { method: 'POST' })
+      .then(() => qc.invalidateQueries({ queryKey: ['bot-history'] }))
+      .catch(() => null)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Start ──────────────────────────────────────────────────────────────────
   const startMut = useMutation({
@@ -37,6 +44,7 @@ export function BotControls({ botData }: { botData: any }) {
       setActionError(null)
       await qc.cancelQueries({ queryKey: ['bot-status'] })
       const prev = qc.getQueryData(['bot-status'])
+      // Optimistic update — UI feels instant
       qc.setQueryData(['bot-status'], (old: any) => ({
         ...old,
         status:        'running',
@@ -51,7 +59,9 @@ export function BotControls({ botData }: { botData: any }) {
     },
     onSettled: () => {
       isFiringRef.current = false
+      // Refresh both status and history
       qc.invalidateQueries({ queryKey: ['bot-status'] })
+      qc.invalidateQueries({ queryKey: ['bot-history'] })
     },
   })
 
@@ -67,6 +77,7 @@ export function BotControls({ botData }: { botData: any }) {
       setActionError(null)
       await qc.cancelQueries({ queryKey: ['bot-status'] })
       const prev = qc.getQueryData(['bot-status'])
+      // Optimistic update
       qc.setQueryData(['bot-status'], (old: any) => ({
         ...old,
         status:        'stopped',
@@ -81,6 +92,7 @@ export function BotControls({ botData }: { botData: any }) {
     onSettled: () => {
       isFiringRef.current = false
       qc.invalidateQueries({ queryKey: ['bot-status'] })
+      qc.invalidateQueries({ queryKey: ['bot-history'] })
     },
   })
 
@@ -92,6 +104,7 @@ export function BotControls({ botData }: { botData: any }) {
 
   function handleStart() {
     if (isFiringRef.current || startMut.isPending || stopMut.isPending) return
+    if (selectedMarkets.length === 0) return
     isFiringRef.current = true
     startMut.mutate()
   }
