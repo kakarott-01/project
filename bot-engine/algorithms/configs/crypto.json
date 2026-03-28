@@ -6,11 +6,14 @@
   "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
   "timeframe": "15m",
   "trend_timeframe": "4h",
+  "signal_cooldown_minutes": 15,
+  "stop_loss_pct": 1.5,
+  "take_profit_pct": 3.0,
   "indicators": {
     "rsi": {
       "period": 14,
-      "oversold": 30,
-      "overbought": 70
+      "oversold": 32,
+      "overbought": 68
     },
     "bb": {
       "length": 20,
@@ -24,6 +27,5 @@
       "multiplier": 1.5
     }
   },
-  "min_confidence": 60,
-  "notes": "Edit this file to change strategy. Bot reloads on next cycle. No restart needed."
+  "notes": "Tightened: mean-rev requires 2-candle RSI confirmation. 15m cooldown between signals. Full TP/SL/time exit logic."
 }

@@ -37,9 +37,12 @@ ALGO_MAP = {
 }
 
 MARKET_INTERVAL = {
+    # Crypto fetches 4h + 15m OHLCV for each symbol (~10s/symbol × 3 = ~35s total).
+    # Interval must be > cycle duration to avoid "max instances reached" skips.
+    # 90s gives a clean buffer: signals fire every ~1.5 minutes instead of every 30s.
     "indian":      60,
-    "crypto":      30,
-    "commodities": 60,
+    "crypto":      60,
+    "commodities": 90,
     "global":      120,
 }
 
