@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
@@ -77,10 +78,17 @@ async def root():
     return {"status": "AlgoBot Engine running 🚀", "docs": "/docs", "health": "/health"}
 
 
-@app.get("/health")
-def health():
-    running = len(scheduler.active_jobs) if scheduler else 0
-    return {"status": "ok", "running_users": running}
+@app.api_route("/health", methods=["GET", "HEAD"])
+async def health():
+    try:
+        running = len(getattr(scheduler, "active_jobs", [])) if scheduler else 0
+    except Exception:
+        running = 0
+
+    return {
+        "status": "ok",
+        "running_users": running
+    }
 
 
 @app.post("/bot/start")
