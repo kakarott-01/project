@@ -5,12 +5,19 @@
   "quote_currency": "INR",
   "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"],
   "timeframe": "5m",
+  "stop_loss_pct": 0.8,
+  "take_profit_pct": 1.5,
   "indicators": {
-    "ema_fast": { "period": 9 },
-    "ema_slow": { "period": 21 },
+    "ema_fast": {
+      "period": 9
+    },
+    "ema_slow": {
+      "period": 21
+    },
     "rsi": {
       "period": 14,
-      "threshold": 50
+      "buy_threshold": 50,
+      "sell_threshold": 50
     },
     "volume": {
       "avg_period": 20,
@@ -20,7 +27,12 @@
   "trading_hours": {
     "start": "09:20",
     "end": "15:15",
-    "square_off": "15:15"
+    "square_off": "15:15",
+    "no_trade_first_minutes": 5
   },
-  "notes": "Auto square-off at 15:15 IST. No trades in first 5 mins after open."
+  "exit_rules": {
+    "square_off_eod": true,
+    "use_tp_sl": true
+  },
+  "notes": "EMA 9/21 crossover with RSI > 50 and volume spike for entry. TP/SL exits. Hard EOD square-off at 15:15 IST. No trades in first 5 mins after open. Restart-safe: restores open positions from DB."
 }

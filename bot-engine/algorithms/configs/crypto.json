@@ -13,19 +13,29 @@
     "rsi": {
       "period": 14,
       "oversold": 32,
-      "overbought": 68
+      "overbought": 68,
+      "trend_buy_zone": [35, 52],
+      "trend_sell_zone": [48, 62]
     },
     "bb": {
       "length": 20,
       "std": 2.0
     },
-    "ema_trend": {
-      "period": 200
+    "ema_fast": {
+      "period": 9
     },
-    "atr": {
-      "period": 14,
-      "multiplier": 1.5
+    "ema_slow": {
+      "period": 21
+    },
+    "ema_trend": {
+      "period": 200,
+      "timeframe": "4h"
     }
   },
-  "notes": "Tightened: mean-rev requires 2-candle RSI confirmation. 15m cooldown between signals. Full TP/SL/time exit logic."
+  "exit_rules": {
+    "time_limit_hours": 2,
+    "rsi_peak_exit": 62,
+    "rsi_retreat_exit": 58
+  },
+  "notes": "Dual-mode: trend-following (EMA200 4h) + mean-reversion (BB squeeze). 2-candle RSI confirmation for mean-rev. 15m cooldown. Full TP/SL/RSI/time exit logic. Restart-safe: restores open positions from DB."
 }

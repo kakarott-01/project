@@ -84,6 +84,7 @@ class CryptoAlgo(BaseAlgo):
     # ── Main signal ───────────────────────────────────────────────────────────
 
     async def generate_signal(self, symbol: str) -> Optional[str]:
+        
         try:
             df_trend = await self.connector.fetch_ohlcv(symbol, "4h", limit=250)
             df       = await self.connector.fetch_ohlcv(symbol, "15m", limit=100)
