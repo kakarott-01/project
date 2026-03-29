@@ -17,11 +17,22 @@ export async function POST(req: NextRequest) {
 
     const normalizedEmail = email.toLowerCase().trim()
 
-    // ── Verify OTP from Redis (replaces broken global.__otpStore) ─────────────
-    const stored = await redis.get<string>(`login_otp:${normalizedEmail}`)
-    if (!stored || stored !== String(otp).trim()) {
+    // ── Verify OTP from Redis ──────────────────────────────────────────────────
+    // IMPORTANT: Upstash Redis may deserialize a stored numeric string (e.g. "123456")
+    // as a JS number (123456). Always coerce to string before comparing.
+    const raw = await redis.get(`login_otp:${normalizedEmail}`)
+
+    if (raw === null || raw === undefined) {
       return NextResponse.json({ error: 'Invalid or expired code' }, { status: 401 })
     }
+
+    const stored   = String(raw).trim()
+    const provided = String(otp).trim()
+
+    if (stored !== provided) {
+      return NextResponse.json({ error: 'Invalid or expired code' }, { status: 401 })
+    }
+
     // Burn after use
     await redis.del(`login_otp:${normalizedEmail}`)
 
@@ -75,6 +86,7 @@ export async function POST(req: NextRequest) {
         name:  normalizedEmail.split('@')[0],
       }), {
         httpOnly: true,
+        secure:   process.env.NODE_ENV === 'production',
         maxAge:   30 * 24 * 60 * 60,
         path:     '/',
         sameSite: 'lax',
@@ -91,6 +103,7 @@ export async function POST(req: NextRequest) {
       name:  normalizedEmail.split('@')[0],
     }), {
       httpOnly: true,
+      secure:   process.env.NODE_ENV === 'production',
       maxAge:   30 * 24 * 60 * 60,
       path:     '/',
       sameSite: 'lax',

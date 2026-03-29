@@ -6,6 +6,7 @@ import {
   AlertTriangle, Shield, Clock, CheckCircle,
   Loader2, Lock, MailCheck, X, ChevronDown, ChevronUp,
 } from 'lucide-react'
+import { ToggleSwitch } from '@/components/ui/toggle-switch'
 
 type TradingMode = 'paper' | 'live'
 
@@ -63,7 +64,6 @@ function OtpModal({ email, onVerified, onClose }: OtpModalProps) {
     return () => clearTimeout(t)
   }, [cooldown])
 
-  // Uses the NEW dedicated mode-switch OTP endpoint
   async function sendOtp() {
     setSending(true); setError('')
     const res = await fetch('/api/mode/send-otp', { method: 'POST' })
@@ -76,7 +76,6 @@ function OtpModal({ email, onVerified, onClose }: OtpModalProps) {
     const code = digits.join('')
     if (code.length !== 6) return
     setVerifying(true); setError('')
-    // Uses the NEW dedicated mode-switch verify endpoint
     const res = await fetch('/api/mode/verify-otp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -487,7 +486,6 @@ export function ModeControls() {
           <div className="space-y-3">
             {displayMarkets.map(({ marketType, mode }) => {
               const isLive      = mode === 'live'
-              // Bot is actively trading this market → lock the toggle
               const isBotActive = botRunning && activeMarkets.includes(marketType)
               const switching   = switchMut.isPending && pending?.marketType === marketType
 
@@ -500,11 +498,11 @@ export function ModeControls() {
                       : 'bg-gray-800/40 border-gray-700/50'
                   }`}
                 >
-                  <div className="flex items-center gap-3">
-                    <span className="text-sm text-gray-300">
+                  <div className="flex items-center gap-3 flex-1 min-w-0 mr-4">
+                    <span className="text-sm text-gray-300 truncate">
                       {MARKET_LABELS[marketType] ?? marketType}
                     </span>
-                    <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${
+                    <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border flex-shrink-0 ${
                       isLive
                         ? 'bg-red-900/30 border-red-800/40 text-red-400'
                         : 'bg-amber-900/20 border-amber-800/30 text-amber-400'
@@ -512,29 +510,26 @@ export function ModeControls() {
                       {isLive ? '🔴 LIVE' : '🟡 PAPER'}
                     </span>
                     {isBotActive && (
-                      <span className="text-xs text-brand-500 bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 rounded-full">
+                      <span className="text-xs text-brand-500 bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 rounded-full flex-shrink-0">
                         Bot active
                       </span>
                     )}
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-shrink-0">
                     {switching && <Loader2 className="w-3.5 h-3.5 animate-spin text-gray-500" />}
-                    <button
-                      disabled={isBotActive || switching}
-                      onClick={() => requestSwitch(marketType, isLive ? 'paper' : 'live')}
-                      title={isBotActive ? 'Stop bot to change mode for this market' : undefined}
-                      className={`relative w-11 h-6 rounded-full transition-colors duration-200 ${
-                        isBotActive || switching
-                          ? 'opacity-40 cursor-not-allowed'
-                          : 'cursor-pointer'
-                      } ${isLive ? 'bg-red-600' : 'bg-gray-600'}`}
-                    >
-                      <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow
-                                        transition-transform duration-200 ${
-                        isLive ? 'translate-x-5' : 'translate-x-0.5'
-                      }`} />
-                    </button>
+                    {/* ── Uses the same ToggleSwitch as Trailing Stop Loss ── */}
+                    <ToggleSwitch
+                      checked={isLive}
+                      onChange={() => {
+                        if (!isBotActive && !switching) {
+                          requestSwitch(marketType, isLive ? 'paper' : 'live')
+                        }
+                      }}
+                      disabled={isBotActive || switching || botRunning}
+                      colorOn="bg-red-600"
+                      colorOff="bg-gray-600"
+                    />
                   </div>
                 </div>
               )

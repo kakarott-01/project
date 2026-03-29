@@ -13,13 +13,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'OTP required' }, { status: 400 })
   }
 
-  const stored = await redis.get<string>(`reveal_otp:${session.id}`)
+  // Upstash may deserialize a stored numeric string as a JS number.
+  // Always coerce to string before comparing.
+  const raw = await redis.get(`reveal_otp:${session.id}`)
 
-  if (!stored) {
+  if (raw === null || raw === undefined) {
     return NextResponse.json({ error: 'No OTP found. Please request a new one.' }, { status: 401 })
   }
 
-  if (stored !== otp.trim()) {
+  const stored = String(raw).trim()
+  const provided = otp.trim()
+
+  if (stored !== provided) {
     return NextResponse.json({ error: 'Invalid OTP.' }, { status: 401 })
   }
 
@@ -32,6 +37,7 @@ export async function POST(req: NextRequest) {
   const response = NextResponse.json({ success: true })
   response.cookies.set('reveal_token', token, {
     httpOnly: true,
+    secure:   process.env.NODE_ENV === 'production',
     maxAge:   5 * 60,
     path:     '/',
     sameSite: 'strict',

@@ -1,7 +1,4 @@
 // app/api/mode/verify-otp/route.ts
-//
-// Verifies the mode-switch OTP (separate from the reveal-API-keys OTP).
-// Sets a short-lived cookie 'mode_switch_token' that /api/mode POST checks.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
@@ -18,13 +15,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'OTP required' }, { status: 400 })
   }
 
-  const stored = await redis.get<string>(`mode_switch_otp:${session.id}`)
+  // Upstash may deserialize stored numeric strings as JS numbers.
+  // Always coerce to string before comparing.
+  const raw = await redis.get(`mode_switch_otp:${session.id}`)
 
-  if (!stored) {
+  if (raw === null || raw === undefined) {
     return NextResponse.json({ error: 'No OTP found. Please request a new one.' }, { status: 401 })
   }
 
-  if (stored !== otp.trim()) {
+  const stored   = String(raw).trim()
+  const provided = otp.trim()
+
+  if (stored !== provided) {
     return NextResponse.json({ error: 'Invalid OTP.' }, { status: 401 })
   }
 
@@ -37,6 +39,7 @@ export async function POST(req: NextRequest) {
   const response = NextResponse.json({ success: true })
   response.cookies.set('mode_switch_token', token, {
     httpOnly: true,
+    secure:   process.env.NODE_ENV === 'production',
     maxAge:   5 * 60,
     path:     '/',
     sameSite: 'strict',
