@@ -33,7 +33,7 @@ export function MobileSidebar({ open, onClose }: MobileSidebarProps) {
             <div className="w-8 h-8 rounded-lg bg-brand-500 flex items-center justify-center flex-shrink-0">
               <Zap className="w-4 h-4 text-white" />
             </div>
-            <span className="font-semibold text-gray-100">AlgoBot</span>
+            <span className="font-semibold text-gray-100">UpBot</span>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-200 transition-colors">
             <ChevronRight className="w-5 h-5" />
@@ -65,7 +65,7 @@ export function Sidebar() {
         <div className="w-8 h-8 rounded-lg bg-brand-500 flex items-center justify-center flex-shrink-0">
           <Zap className="w-4 h-4 text-white" />
         </div>
-        <span className="font-semibold text-gray-100">AlgoBot</span>
+        <span className="font-semibold text-gray-100">UpBot</span>
       </div>
       <nav className="flex-1 p-3 space-y-0.5">
         {dashboardNav.map(({ href, icon: Icon, label }) => {
@@ -82,7 +82,7 @@ export function Sidebar() {
         })}
       </nav>
       <div className="px-4 py-3 border-t border-gray-800">
-        <p className="text-xs text-gray-700">AlgoBot v1.0.0</p>
+        <p className="text-xs text-gray-700">UpBot v2.0.0</p>
       </div>
     </aside>
   )
