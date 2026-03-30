@@ -1,27 +1,78 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="0" fill="#030712"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="bgGrad" cx="38%" cy="32%" r="70%" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0D2137"/>
+      <stop offset="100%" stop-color="#020A12"/>
+    </radialGradient>
+    <radialGradient id="glowGrad" cx="50%" cy="55%" r="45%" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1D9E75" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#1D9E75" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="lineGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#13C584"/>
+      <stop offset="100%" stop-color="#1D9E75"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="10" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
 
-  <line x1="0" y1="170" x2="512" y2="170" stroke="#1D9E75" stroke-width="1" stroke-opacity="0.08"/>
-  <line x1="0" y1="340" x2="512" y2="340" stroke="#1D9E75" stroke-width="1" stroke-opacity="0.08"/>
-  <line x1="170" y1="0" x2="170" y2="512" stroke="#1D9E75" stroke-width="1" stroke-opacity="0.08"/>
-  <line x1="340" y1="0" x2="340" y2="512" stroke="#1D9E75" stroke-width="1" stroke-opacity="0.08"/>
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="256" fill="url(#bgGrad)"/>
+  <!-- Center ambient glow -->
+  <circle cx="256" cy="270" r="190" fill="url(#glowGrad)"/>
+  <!-- Subtle ring -->
+  <circle cx="256" cy="256" r="230" fill="none" stroke="#1D9E75" stroke-width="1.5" stroke-opacity="0.10"/>
 
-  <polyline points="72,390 180,275 258,318 358,185 440,110"
-    fill="none" stroke="#1D9E75" stroke-width="52" stroke-linecap="round"
-    stroke-linejoin="round" stroke-opacity="0.12"/>
+  <!--
+    Chart line: A(98,340) B(183,268) C(248,302) D(372,152)
 
-  <polyline points="72,390 180,275 258,318 358,185 440,110"
-    fill="none" stroke="#1D9E75" stroke-width="26" stroke-linecap="round"
-    stroke-linejoin="round"/>
+    Arrow at D(372,152):
+    Segment C→D: dx=124, dy=-150
+    Length = sqrt(124²+150²) = sqrt(15376+22500) = sqrt(37876) ≈ 194.6
+    ux = 124/194.6 = 0.6375   uy = -150/194.6 = -0.7709
+    px (perp 90° CCW) = 0.7709   py = 0.6375
 
-  <line x1="440" y1="110" x2="370" y2="110"
-    stroke="#1D9E75" stroke-width="26" stroke-linecap="round"/>
-  <line x1="440" y1="110" x2="440" y2="180"
-    stroke="#1D9E75" stroke-width="26" stroke-linecap="round"/>
+    Back 56px from D:
+    Bx = 372 - 56*0.6375 = 372 - 35.7 = 336.3
+    By = 152 - 56*(-0.7709) = 152 + 43.2 = 195.2
 
-  <circle cx="440" cy="110" r="22" fill="#1D9E75" opacity="0.3"/>
-  <circle cx="440" cy="110" r="14" fill="#1D9E75"/>
+    Spread ±33px along perp:
+    Arm1 = (336.3 + 33*0.7709, 195.2 + 33*0.6375) = (361.7, 216.2)
+    Arm2 = (336.3 - 33*0.7709, 195.2 - 33*0.6375) = (310.9, 174.2)
+  -->
 
-  <line x1="60" y1="418" x2="452" y2="418"
-    stroke="#1D9E75" stroke-width="6" stroke-linecap="round" stroke-opacity="0.3"/>
+  <!-- Glow layer -->
+  <g filter="url(#glow)" opacity="0.40">
+    <polyline points="98,340 183,268 248,302 372,152"
+      fill="none" stroke="#1D9E75" stroke-width="20"
+      stroke-linecap="round" stroke-linejoin="round"/>
+    <line x1="372" y1="152" x2="362" y2="216"
+      stroke="#1D9E75" stroke-width="20" stroke-linecap="round"/>
+    <line x1="372" y1="152" x2="311" y2="174"
+      stroke="#1D9E75" stroke-width="20" stroke-linecap="round"/>
+  </g>
+
+  <!-- Chart line -->
+  <polyline points="98,340 183,268 248,302 372,152"
+    fill="none" stroke="url(#lineGrad)" stroke-width="18"
+    stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Arrow arm 1: from tip (372,152) → (362,216) -->
+  <line x1="372" y1="152" x2="362" y2="216"
+    stroke="url(#lineGrad)" stroke-width="18" stroke-linecap="round"/>
+
+  <!-- Arrow arm 2: from tip (372,152) → (311,174) -->
+  <line x1="372" y1="152" x2="311" y2="174"
+    stroke="url(#lineGrad)" stroke-width="18" stroke-linecap="round"/>
+
+  <!-- Baseline -->
+  <line x1="84" y1="372" x2="416" y2="372"
+    stroke="#1D9E75" stroke-width="6" stroke-linecap="round" stroke-opacity="0.28"/>
+
+  <!-- Vertex dots -->
+  <circle cx="98"  cy="340" r="10" fill="#1D9E75" opacity="0.40"/>
+  <circle cx="183" cy="268" r="10" fill="#1D9E75" opacity="0.55"/>
+  <circle cx="248" cy="302" r="10" fill="#1D9E75" opacity="0.55"/>
 </svg>
