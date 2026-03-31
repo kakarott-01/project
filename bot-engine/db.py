@@ -20,6 +20,12 @@ v2 ADDITIONS (Stop Bot feature):
 - cancel_orphan_trade()             → reconciliation helper
 - save_paper_trade() (updated)      → accepts optional session_ref
 - save_live_trade()  (updated)      → accepts optional session_ref
+
+v3 ADDITIONS (Auto-restart on startup):
+- get_running_user_bots()           → returns {user_id: [markets]} for all
+                                      users whose bot_statuses shows 'running'
+                                      Used by main.py lifespan to auto-restart
+                                      bots after Render deploys/restarts.
 """
 
 import os
@@ -95,19 +101,63 @@ class Database:
     # ── Startup cleanup ───────────────────────────────────────────────────────
 
     async def cleanup_stale_sessions(self) -> int:
+        """
+        Called on startup BEFORE auto-restart.
+        Closes any bot_sessions that were left in 'running' state.
+        Does NOT touch bot_statuses — we need those to know which bots to restart.
+        """
         pool = await self.pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
                 result = await conn.execute(
                     "UPDATE bot_sessions SET status='stopped', ended_at=NOW() WHERE status='running'"
                 )
-                await conn.execute(
-                    "UPDATE bot_statuses SET status='stopped', updated_at=NOW() WHERE status='running'"
-                )
         try:
             return int(result.split()[-1])
         except Exception:
             return 0
+
+    # ── Auto-restart support (v3) ─────────────────────────────────────────────
+
+    async def get_running_user_bots(self) -> Dict[str, List[str]]:
+        """
+        Returns a mapping of user_id → list of markets for all users whose
+        bot_statuses row shows status='running'.
+
+        Called during startup lifespan to auto-restart bots after a Render
+        deploy or free-tier restart. After cleanup_stale_sessions() has run,
+        bot_sessions are all marked stopped, but bot_statuses still reflects
+        the pre-restart 'running' state — that's what we use here.
+
+        Returns: { "uuid-string": ["crypto", "indian"], ... }
+        """
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """
+            SELECT user_id::text, active_markets
+            FROM bot_statuses
+            WHERE status = 'running'
+            """
+        )
+        result: Dict[str, List[str]] = {}
+        for row in rows:
+            try:
+                raw = row["active_markets"]
+                if isinstance(raw, str):
+                    markets = json.loads(raw)
+                elif isinstance(raw, list):
+                    markets = raw
+                else:
+                    markets = []
+
+                # Only include users that actually had active markets
+                if markets:
+                    result[str(row["user_id"])] = markets
+            except Exception as e:
+                logger.error(
+                    f"❌ get_running_user_bots parse error user={row['user_id']}: {e}"
+                )
+        return result
 
     # ── Exchange APIs ─────────────────────────────────────────────────────────
 
@@ -445,8 +495,8 @@ class Database:
 
     async def get_bot_stop_mode(self, user_id: str) -> Optional[str]:
         """
-        Returns the stop_mode from bot_statuses for this user when status='stopping'.
-        Returns 'graceful', 'close_all', or None.
+        Returns the current stop mode from DB, or None if running normally.
+        Possible values: 'close_all', 'graceful', None
         """
         pool = await self.pool()
         row = await pool.fetchrow(

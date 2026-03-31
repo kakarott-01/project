@@ -1,9 +1,14 @@
 """
-bot-engine/main.py — REVISED v2
+bot-engine/main.py — REVISED v3
 =================================
-Adds:
-  POST /bot/drain      → enter graceful stop (no new entries, keep exits)
-  POST /bot/close-all  → start CloseAllEngine for user
+Changes from v2:
+  1. Auto-restart: on startup, any user whose bot_statuses shows
+     status='running' gets their bot automatically restarted.
+     Survives Render deploys/restarts with zero manual intervention.
+
+  2. Self-ping interval reduced from 600s → 60s to keep free tier warm.
+
+  3. Initial self-ping delay reduced from 120s → 30s.
 """
 
 from fastapi import FastAPI, Header, HTTPException, Depends
@@ -39,12 +44,13 @@ async def lifespan(app: FastAPI):
     from scheduler import BotScheduler
     from workers.watchdog import Watchdog
 
-    logger.info("🚀 AlgoBot Engine v2 starting up…")
+    logger.info("🚀 AlgoBot Engine v3 starting up…")
 
     _db        = Database()
     _scheduler = BotScheduler(_db)
     _watchdog  = Watchdog(_scheduler, _db)
 
+    # ── Step 1: Clean up stale sessions from previous run ─────────────────────
     try:
         cleaned = await _db.cleanup_stale_sessions()
         if cleaned:
@@ -55,11 +61,35 @@ async def lifespan(app: FastAPI):
     _scheduler.start()
     asyncio.create_task(_watchdog.run(), name="watchdog")
 
+    # ── Step 2: Auto-restart bots that were running before this restart ────────
+    # This handles Render deploys, free-tier restarts, and crashes.
+    # bot_statuses rows with status='running' mean the user had an active bot.
+    try:
+        running_bots = await _db.get_running_user_bots()
+        if running_bots:
+            logger.info(
+                f"♻️  Found {len(running_bots)} bot(s) to auto-restart after startup"
+            )
+            for user_id, markets in running_bots.items():
+                logger.info(
+                    f"♻️  Auto-restarting bot user={user_id[:8]}… markets={markets}"
+                )
+                # Use create_task so startup doesn't block waiting for all restarts
+                asyncio.create_task(
+                    _safe_auto_restart(_scheduler, _db, user_id, markets),
+                    name=f"auto_restart_{user_id}",
+                )
+        else:
+            logger.info("♻️  No bots to auto-restart — clean startup")
+    except Exception as e:
+        logger.warning(f"⚠️  Auto-restart check failed (non-fatal): {e}")
+
+    # ── Step 3: Self-ping loop to keep Render free tier alive ─────────────────
     engine_url = os.getenv("BOT_ENGINE_URL", "")
     if engine_url:
         asyncio.create_task(_self_ping_loop(engine_url), name="self_ping")
 
-    logger.info("✅ AlgoBot Engine v2 ready")
+    logger.info("✅ AlgoBot Engine v3 ready")
     yield
 
     logger.info("🛑 Shutting down…")
@@ -69,9 +99,36 @@ async def lifespan(app: FastAPI):
     logger.info("✅ Shutdown complete")
 
 
+async def _safe_auto_restart(scheduler, db, user_id: str, markets: List[str]):
+    """
+    Wraps start_user_bot in error handling so one failed restart doesn't
+    block others. On failure, marks the bot as stopped so the UI reflects
+    the real state.
+    """
+    try:
+        await asyncio.sleep(2)  # brief stagger so DB pool is fully ready
+        await scheduler.start_user_bot(user_id, markets)
+        logger.info(
+            f"✅ Auto-restart succeeded user={user_id[:8]}… markets={markets}"
+        )
+    except Exception as e:
+        logger.error(
+            f"❌ Auto-restart failed user={user_id[:8]}…: {e}", exc_info=True
+        )
+        # Mark as stopped so UI doesn't show a phantom "running" state
+        try:
+            await db.update_bot_status(user_id, "stopped", [])
+        except Exception as db_err:
+            logger.error(f"❌ Could not update status after failed restart: {db_err}")
+
+
 async def _self_ping_loop(base_url: str):
+    """
+    Pings /health every 60 seconds to keep Render free tier from spinning down.
+    Initial delay of 30s lets the server fully boot before first ping.
+    """
     import httpx
-    await asyncio.sleep(120)
+    await asyncio.sleep(30)
     while True:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
@@ -79,10 +136,10 @@ async def _self_ping_loop(base_url: str):
                 logger.debug(f"💓 Self-ping {r.status_code}")
         except Exception as e:
             logger.warning(f"💓 Self-ping failed: {e}")
-        await asyncio.sleep(600)
+        await asyncio.sleep(60)  # every 60s — was 600s
 
 
-app = FastAPI(title="AlgoBot Engine", version="2.1.0", lifespan=lifespan)
+app = FastAPI(title="AlgoBot Engine", version="3.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -117,7 +174,7 @@ class CloseAllRequest(BaseModel):
 
 @app.get("/")
 async def root():
-    return {"status": "AlgoBot Engine running 🚀", "version": "2.1.0"}
+    return {"status": "AlgoBot Engine running 🚀", "version": "3.0.0"}
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
