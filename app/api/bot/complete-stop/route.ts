@@ -12,7 +12,7 @@
 // and to clearly separate user-initiated vs engine-initiated transitions.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { _doImmediateStop } from '@/app/api/bot/stop/route'
+import { _doImmediateStop } from '@/lib/bot-stop'
 
 export async function POST(req: NextRequest) {
   // Verify the request is from the bot engine, not a user
