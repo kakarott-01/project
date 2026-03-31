@@ -6,7 +6,7 @@ import {
   AlertTriangle, X, Activity, Filter, Download,
   TrendingUp, TrendingDown, RefreshCw, Bot,
 } from 'lucide-react'
-import { format, formatDuration, intervalToDuration } from 'date-fns'
+import { format} from 'date-fns'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface BotSession {
@@ -32,12 +32,16 @@ interface Pagination {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function getDuration(start: string, end: string | null): string {
-  const s = new Date(start)
-  const e = end ? new Date(end) : new Date()
-  const dur = intervalToDuration({ start: s, end: e })
-  if ((dur.hours ?? 0) > 0) return `${dur.hours}h ${dur.minutes}m`
-  if ((dur.minutes ?? 0) > 0) return `${dur.minutes}m ${dur.seconds}s`
-  return `${dur.seconds ?? 0}s`
+  const s         = new Date(start)
+  const e         = end ? new Date(end) : new Date()
+  const totalSecs = Math.max(0, Math.floor((e.getTime() - s.getTime()) / 1000))
+  const h         = Math.floor(totalSecs / 3600)
+  const m         = Math.floor((totalSecs % 3600) / 60)
+  const sec       = totalSecs % 60
+
+  if (h > 0) return `${h}h ${m}m`
+  if (m > 0) return `${m}m ${sec}s`
+  return `${sec}s`
 }
 
 const MARKET_LABEL: Record<string, string> = {
