@@ -1,70 +1,234 @@
 // app/api/bot/stop/route.ts
+// =========================
+// Handles two stop modes:
+//
+//  "close_all"  → Bot engine immediately market-closes every open position,
+//                 confirms fills, retries partials, then stops.
+//
+//  "graceful"   → Bot enters 'stopping' state. No new entries. Exit logic
+//                 (SL/TP/strategy) continues each cycle. Auto-stops when
+//                 all positions reach zero.
+//
+// If there are NO open positions, both modes behave as an immediate stop.
+//
+// Idempotency:
+//  - Redis lock prevents concurrent stop operations.
+//  - Already-stopped → 200 with current state (no error).
+//  - Already-stopping + same mode → 200 (no-op).
+//  - Already-stopping + escalate to close_all → accepted, mode updated.
+
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
 import { botStatuses, botSessions, trades } from '@/lib/schema'
 import { eq, and, sql } from 'drizzle-orm'
+import { acquireBotLock } from '@/lib/bot-lock'
+
+type StopMode = 'close_all' | 'graceful'
 
 export async function POST(req: NextRequest) {
   const session = await auth()
   if (!session?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  // Fire-and-forget to bot engine (don't block the UI on this)
-  fetch(`${process.env.BOT_ENGINE_URL}/bot/stop`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Bot-Secret': process.env.BOT_ENGINE_SECRET!,
-    },
-    body: JSON.stringify({ user_id: session.id }),
-    signal: AbortSignal.timeout(8_000),
-  }).catch(() => null)
+  // ── Parse mode ─────────────────────────────────────────────────────────────
+  let mode: StopMode = 'graceful'
+  try {
+    const body = await req.json()
+    if (body?.mode === 'close_all') mode = 'close_all'
+    else if (body?.mode === 'graceful') mode = 'graceful'
+  } catch { /* empty body → default graceful */ }
 
+  // ── Redis lock — prevent concurrent stop operations ─────────────────────────
+  const lock = await acquireBotLock(session.id, 'stop')
+  if (!lock.acquired) {
+    return NextResponse.json({ error: lock.reason }, { status: 429 })
+  }
+
+  try {
+    return await _handleStop(session.id, mode)
+  } finally {
+    await lock.release()
+  }
+}
+
+async function _handleStop(userId: string, mode: StopMode): Promise<NextResponse> {
   const now = new Date()
 
-  // ── Close ALL running sessions for this user ──────────────────────────────
-  // (handles the case where multiple stale sessions exist)
+  // ── Load current status ─────────────────────────────────────────────────────
+  const current = await db.query.botStatuses.findFirst({
+    where: eq(botStatuses.userId, userId),
+  })
+
+  // Already fully stopped — idempotent success
+  if (!current || current.status === 'stopped') {
+    return NextResponse.json({ success: true, status: 'stopped', mode: null })
+  }
+
+  // Already stopping in graceful mode and user wants to escalate to close_all
+  const escalating = current.status === 'stopping' && mode === 'close_all'
+  // Already stopping in same mode — idempotent
+  if (current.status === 'stopping' && !escalating) {
+    const openCount = await _countOpenTrades(userId)
+    return NextResponse.json({
+      success:    true,
+      status:     'stopping',
+      mode:       current.stopMode,
+      openTrades: openCount,
+    })
+  }
+
+  // ── Count open trades ───────────────────────────────────────────────────────
+  const openCount = await _countOpenTrades(userId)
+
+  // ── No open positions → immediate stop regardless of mode ──────────────────
+  if (openCount === 0) {
+    await _doImmediateStop(userId, now)
+    return NextResponse.json({ success: true, status: 'stopped', mode, openTrades: 0 })
+  }
+
+  // ── close_all mode ──────────────────────────────────────────────────────────
+  if (mode === 'close_all') {
+    // Tell bot engine to enter close_all mode
+    // Engine will: market-close all positions, confirm fills, retry, then self-stop
+    _notifyBotEngine(userId, 'close_all').catch(() => null)
+
+    await db.insert(botStatuses)
+      .values({
+        userId,
+        status:         'stopping' as any,
+        activeMarkets:  current.activeMarkets ?? [],
+        stopMode:       'close_all',
+        stoppingAt:     now,
+        updatedAt:      now,
+        stopTimeoutSec: 300,
+      })
+      .onConflictDoUpdate({
+        target: botStatuses.userId,
+        set: {
+          status:         'stopping' as any,
+          stopMode:       'close_all',
+          stoppingAt:     now,
+          updatedAt:      now,
+          errorMessage:   null,
+          stopTimeoutSec: 300,
+        },
+      })
+
+    return NextResponse.json({
+      success:    true,
+      status:     'stopping',
+      mode:       'close_all',
+      openTrades: openCount,
+    })
+  }
+
+  // ── graceful mode ───────────────────────────────────────────────────────────
+  _notifyBotEngine(userId, 'drain').catch(() => null)
+
+  await db.insert(botStatuses)
+    .values({
+      userId,
+      status:         'stopping' as any,
+      activeMarkets:  current.activeMarkets ?? [],
+      stopMode:       'graceful',
+      stoppingAt:     now,
+      updatedAt:      now,
+      stopTimeoutSec: 3600, // graceful can take longer — 1 hour default
+    })
+    .onConflictDoUpdate({
+      target: botStatuses.userId,
+      set: {
+        status:         'stopping' as any,
+        stopMode:       'graceful',
+        stoppingAt:     now,
+        updatedAt:      now,
+        errorMessage:   null,
+        stopTimeoutSec: 3600,
+      },
+    })
+
+  return NextResponse.json({
+    success:    true,
+    status:     'stopping',
+    mode:       'graceful',
+    openTrades: openCount,
+  })
+}
+
+// ── Internal stop (called when positions = 0 OR from bot engine callback) ──────
+export async function _doImmediateStop(userId: string, now: Date) {
+  // Fire-and-forget to engine
+  _notifyBotEngine(userId, 'stop').catch(() => null)
+
+  // Close all running/stopping bot sessions
   const runningSessions = await db.query.botSessions.findMany({
     where: and(
-      eq(botSessions.userId, session.id),
-      eq(botSessions.status, 'running'),
+      eq(botSessions.userId, userId),
+      sql`${botSessions.status} IN ('running', 'stopping')`,
     ),
   })
 
-  for (const botSession of runningSessions) {
-    // Count trades that were opened during this session's window for this market
+  for (const s of runningSessions) {
     const stats = await db
       .select({
         total:  sql<number>`count(*)::int`,
-        open:   sql<number>`count(*) filter (where status = 'open')::int`,
-        closed: sql<number>`count(*) filter (where status = 'closed')::int`,
-        pnl:    sql<number>`coalesce(sum(pnl) filter (where status = 'closed'), 0)::float`,
+        open:   sql<number>`count(*) filter (where status='open')::int`,
+        closed: sql<number>`count(*) filter (where status='closed')::int`,
+        pnl:    sql<number>`coalesce(sum(pnl) filter (where status='closed'),0)::float`,
       })
       .from(trades)
       .where(and(
-        eq(trades.userId, session.id),
-        eq(trades.marketType, botSession.market as any),
-        sql`${trades.openedAt} >= ${botSession.startedAt}`,
+        eq(trades.userId, userId),
+        eq(trades.marketType, s.market as any),
+        sql`${trades.openedAt} >= ${s.startedAt}`,
       ))
 
-    const s = stats[0]
+    const row = stats[0]
     await db.update(botSessions)
       .set({
         status:       'stopped',
         endedAt:      now,
-        totalTrades:  s?.total  ?? 0,
-        openTrades:   s?.open   ?? 0,
-        closedTrades: s?.closed ?? 0,
-        totalPnl:     String(s?.pnl ?? 0),
+        totalTrades:  row?.total  ?? 0,
+        openTrades:   row?.open   ?? 0,
+        closedTrades: row?.closed ?? 0,
+        totalPnl:     String(row?.pnl ?? 0),
       })
-      .where(eq(botSessions.id, botSession.id))
+      .where(eq(botSessions.id, s.id))
   }
 
-  // ── If somehow there are no running sessions but status says running, ──────
-  // still mark status as stopped
   await db.update(botStatuses)
-    .set({ status: 'stopped', stoppedAt: now, updatedAt: now })
-    .where(eq(botStatuses.userId, session.id))
+    .set({
+      status:     'stopped',
+      stoppedAt:  now,
+      updatedAt:  now,
+      stopMode:   null,
+      stoppingAt: null,
+    })
+    .where(eq(botStatuses.userId, userId))
+}
 
-  return NextResponse.json({ success: true, status: 'stopped' })
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+async function _countOpenTrades(userId: string): Promise<number> {
+  const rows = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(trades)
+    .where(and(eq(trades.userId, userId), eq(trades.status, 'open' as any)))
+  return rows[0]?.count ?? 0
+}
+
+async function _notifyBotEngine(userId: string, action: 'stop' | 'drain' | 'close_all') {
+  const endpoint = action === 'stop'      ? '/bot/stop'
+                 : action === 'drain'     ? '/bot/drain'
+                 : '/bot/close-all'
+
+  await fetch(`${process.env.BOT_ENGINE_URL}${endpoint}`, {
+    method:  'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Bot-Secret': process.env.BOT_ENGINE_SECRET!,
+    },
+    body:   JSON.stringify({ user_id: userId }),
+    signal: AbortSignal.timeout(8_000),
+  })
 }

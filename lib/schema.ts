@@ -10,10 +10,11 @@ export const marketTypeEnum = pgEnum('market_type', [
 ])
 export const tradeSideEnum    = pgEnum('trade_side', ['buy', 'sell'])
 export const tradeStatusEnum  = pgEnum('trade_status', ['pending', 'open', 'closed', 'cancelled', 'failed'])
-export const botStatusEnum    = pgEnum('bot_status_enum', ['running', 'stopped', 'paused', 'error'])
+export const botStatusEnum    = pgEnum('bot_status_enum', ['running', 'stopped', 'paused', 'error', 'stopping'])
 export const signalEnum       = pgEnum('signal_type', ['buy', 'sell', 'hold'])
 export const tradingModeEnum  = pgEnum('trading_mode', ['paper', 'live'])
 export const botSessionStatusEnum = pgEnum('bot_session_status', ['running', 'stopped', 'error'])
+export const closeLogStatusEnum   = pgEnum('close_log_status', ['pending', 'filled', 'partial', 'failed'])
 
 // ─── Users ────────────────────────────────────────────────────────────────────
 export const users = pgTable('users', {
@@ -96,19 +97,23 @@ export const exchangeApis = pgTable('exchange_apis', {
 
 // ─── Bot Status ───────────────────────────────────────────────────────────────
 export const botStatuses = pgTable('bot_statuses', {
-  id:            uuid('id').defaultRandom().primaryKey(),
-  userId:        uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull().unique(),
-  status:        botStatusEnum('status').default('stopped').notNull(),
-  activeMarkets: jsonb('active_markets').$type<string[]>().default([]),
-  startedAt:     timestamp('started_at'),
-  stoppedAt:     timestamp('stopped_at'),
-  lastHeartbeat: timestamp('last_heartbeat'),
-  lastSignal:    text('last_signal'),
-  errorMessage:  text('error_message'),
-  updatedAt:     timestamp('updated_at').defaultNow().notNull(),
+  id:             uuid('id').defaultRandom().primaryKey(),
+  userId:         uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull().unique(),
+  status:         botStatusEnum('status').default('stopped').notNull(),
+  activeMarkets:  jsonb('active_markets').$type<string[]>().default([]),
+  startedAt:      timestamp('started_at'),
+  stoppedAt:      timestamp('stopped_at'),
+  lastHeartbeat:  timestamp('last_heartbeat'),
+  lastSignal:     text('last_signal'),
+  errorMessage:   text('error_message'),
+  updatedAt:      timestamp('updated_at').defaultNow().notNull(),
+  // ── Stop behavior ──
+  stopMode:       varchar('stop_mode', { length: 20 }),    // 'close_all' | 'graceful' | null
+  stoppingAt:     timestamp('stopping_at'),                // when stop was initiated
+  stopTimeoutSec: integer('stop_timeout_sec').default(300),// alert after N seconds
 })
 
-// ─── Bot Sessions (NEW) ───────────────────────────────────────────────────────
+// ─── Bot Sessions ─────────────────────────────────────────────────────────────
 export const botSessions = pgTable('bot_sessions', {
   id:           uuid('id').defaultRandom().primaryKey(),
   userId:       uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
@@ -148,7 +153,7 @@ export const riskSettings = pgTable('risk_settings', {
 export const trades = pgTable('trades', {
   id:              uuid('id').defaultRandom().primaryKey(),
   userId:          uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
-  sessionId:       uuid('session_id').references(() => botSessions.id, { onDelete: 'set null' }), // NEW
+  sessionId:       uuid('session_id').references(() => botSessions.id, { onDelete: 'set null' }),
   exchangeName:    varchar('exchange_name', { length: 100 }).notNull(),
   marketType:      marketTypeEnum('market_type').notNull(),
   symbol:          varchar('symbol', { length: 50 }).notNull(),
@@ -168,12 +173,35 @@ export const trades = pgTable('trades', {
   openedAt:        timestamp('opened_at').defaultNow().notNull(),
   closedAt:        timestamp('closed_at'),
   metadata:        jsonb('metadata'),
+  // ── New: ownership & close tracking ──
+  botSessionRef:   varchar('bot_session_ref', { length: 100 }), // "{userId}:{sessionId}"
+  closeAttempts:   integer('close_attempts').default(0),
+  closeError:      text('close_error'),
 }, (t) => ({
   userIdx:      index('trades_user_idx').on(t.userId),
   symbolIdx:    index('trades_symbol_idx').on(t.symbol),
   statusIdx:    index('trades_status_idx').on(t.status),
   openedIdx:    index('trades_opened_idx').on(t.openedAt),
   sessionIdx:   index('trades_session_idx').on(t.sessionId),
+  userOpenIdx:  index('idx_trades_user_open').on(t.userId, t.status),
+}))
+
+// ─── Position Close Log ───────────────────────────────────────────────────────
+export const positionCloseLog = pgTable('position_close_log', {
+  id:              uuid('id').defaultRandom().primaryKey(),
+  userId:          uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  tradeId:         uuid('trade_id').references(() => trades.id, { onDelete: 'cascade' }).notNull(),
+  attempt:         integer('attempt').default(1).notNull(),
+  status:          closeLogStatusEnum('status').notNull(),
+  quantityReq:     decimal('quantity_req',  { precision: 20, scale: 8 }),
+  quantityFill:    decimal('quantity_fill', { precision: 20, scale: 8 }),
+  exchangeOrderId: varchar('exchange_order_id', { length: 255 }),
+  errorMessage:    text('error_message'),
+  attemptedAt:     timestamp('attempted_at').defaultNow().notNull(),
+  filledAt:        timestamp('filled_at'),
+}, (t) => ({
+  tradeIdx: index('idx_close_log_trade').on(t.tradeId),
+  userIdx:  index('idx_close_log_user').on(t.userId, t.attemptedAt),
 }))
 
 // ─── Algo Signals ─────────────────────────────────────────────────────────────
@@ -211,15 +239,16 @@ export const modeAuditLogs = pgTable('mode_audit_logs', {
 
 // ─── Relations ────────────────────────────────────────────────────────────────
 export const usersRelations = relations(users, ({ many, one }) => ({
-  sessions:      many(sessions),
-  marketConfigs: many(marketConfigs),
-  exchangeApis:  many(exchangeApis),
-  trades:        many(trades),
-  algoSignals:   many(algoSignals),
-  modeAuditLogs: many(modeAuditLogs),
-  botSessions:   many(botSessions),
-  botStatus:     one(botStatuses, { fields: [users.id], references: [botStatuses.userId] }),
-  riskSettings:  one(riskSettings, { fields: [users.id], references: [riskSettings.userId] }),
+  sessions:        many(sessions),
+  marketConfigs:   many(marketConfigs),
+  exchangeApis:    many(exchangeApis),
+  trades:          many(trades),
+  algoSignals:     many(algoSignals),
+  modeAuditLogs:   many(modeAuditLogs),
+  botSessions:     many(botSessions),
+  positionCloseLogs: many(positionCloseLog),
+  botStatus:       one(botStatuses,  { fields: [users.id], references: [botStatuses.userId] }),
+  riskSettings:    one(riskSettings, { fields: [users.id], references: [riskSettings.userId] }),
 }))
 
 export const botSessionsRelations = relations(botSessions, ({ one, many }) => ({
@@ -227,24 +256,32 @@ export const botSessionsRelations = relations(botSessions, ({ one, many }) => ({
   trades: many(trades),
 }))
 
-export const tradesRelations = relations(trades, ({ one }) => ({
-  user:    one(users,       { fields: [trades.userId],    references: [users.id] }),
-  session: one(botSessions, { fields: [trades.sessionId], references: [botSessions.id] }),
+export const tradesRelations = relations(trades, ({ one, many }) => ({
+  user:      one(users,       { fields: [trades.userId],    references: [users.id] }),
+  session:   one(botSessions, { fields: [trades.sessionId], references: [botSessions.id] }),
+  closeLogs: many(positionCloseLog),
+}))
+
+export const positionCloseLogRelations = relations(positionCloseLog, ({ one }) => ({
+  user:  one(users,  { fields: [positionCloseLog.userId],  references: [users.id] }),
+  trade: one(trades, { fields: [positionCloseLog.tradeId], references: [trades.id] }),
 }))
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-export type User           = typeof users.$inferSelect
-export type NewUser        = typeof users.$inferInsert
-export type AccessCode     = typeof accessCodes.$inferSelect
-export type Session        = typeof sessions.$inferSelect
-export type MarketConfig   = typeof marketConfigs.$inferSelect
-export type ExchangeApi    = typeof exchangeApis.$inferSelect
-export type Trade          = typeof trades.$inferSelect
-export type NewTrade       = typeof trades.$inferInsert
-export type AlgoSignal     = typeof algoSignals.$inferSelect
-export type BotStatus      = typeof botStatuses.$inferSelect
-export type RiskSettings   = typeof riskSettings.$inferSelect
-export type ModeAuditLog   = typeof modeAuditLogs.$inferSelect
-export type TradingMode    = 'paper' | 'live'
-export type BotSession     = typeof botSessions.$inferSelect
-export type NewBotSession  = typeof botSessions.$inferInsert
+export type User              = typeof users.$inferSelect
+export type NewUser           = typeof users.$inferInsert
+export type AccessCode        = typeof accessCodes.$inferSelect
+export type Session           = typeof sessions.$inferSelect
+export type MarketConfig      = typeof marketConfigs.$inferSelect
+export type ExchangeApi       = typeof exchangeApis.$inferSelect
+export type Trade             = typeof trades.$inferSelect
+export type NewTrade          = typeof trades.$inferInsert
+export type AlgoSignal        = typeof algoSignals.$inferSelect
+export type BotStatus         = typeof botStatuses.$inferSelect
+export type RiskSettings      = typeof riskSettings.$inferSelect
+export type ModeAuditLog      = typeof modeAuditLogs.$inferSelect
+export type TradingMode       = 'paper' | 'live'
+export type BotSession        = typeof botSessions.$inferSelect
+export type NewBotSession     = typeof botSessions.$inferInsert
+export type PositionCloseLog  = typeof positionCloseLog.$inferSelect
+export type StopMode          = 'close_all' | 'graceful'

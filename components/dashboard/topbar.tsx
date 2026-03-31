@@ -1,8 +1,11 @@
 'use client'
 
+// components/dashboard/topbar.tsx — v2
+// Shows: running / stopping-graceful / stopping-close_all / stopped
+
 import { signOut } from 'next-auth/react'
 import { useQuery } from '@tanstack/react-query'
-import { LogOut, Bell, Menu } from 'lucide-react'
+import { LogOut, Bell, Menu, AlertTriangle } from 'lucide-react'
 import { useState, useEffect, useRef } from 'react'
 import { MobileSidebar } from '@/components/dashboard/sidebar'
 
@@ -14,7 +17,6 @@ interface TopBarProps {
   } | null
 }
 
-// Ticks every second, returns a formatted duration string like "2h 14m 33s"
 function useRunTimer(startedAt: string | null | undefined): string {
   const [, setTick] = useState(0)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -24,7 +26,6 @@ function useRunTimer(startedAt: string | null | undefined): string {
       if (intervalRef.current) clearInterval(intervalRef.current)
       return
     }
-    // Tick immediately, then every second
     setTick(t => t + 1)
     intervalRef.current = setInterval(() => setTick(t => t + 1), 1000)
     return () => {
@@ -33,62 +34,76 @@ function useRunTimer(startedAt: string | null | undefined): string {
   }, [startedAt])
 
   if (!startedAt) return ''
-
-  const start = new Date(startedAt).getTime()
-  const now   = Date.now()
-  const diff  = Math.max(0, Math.floor((now - start) / 1000))
-
+  const diff = Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000))
   const h = Math.floor(diff / 3600)
   const m = Math.floor((diff % 3600) / 60)
   const s = diff % 60
-
   if (h > 0) return `${h}h ${m}m ${String(s).padStart(2, '0')}s`
   if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`
   return `${s}s`
 }
 
 export function TopBar({ user }: TopBarProps) {
-  const [menuOpen,       setMenuOpen]       = useState(false)
-  const [mobileNavOpen,  setMobileNavOpen]  = useState(false)
+  const [menuOpen,      setMenuOpen]      = useState(false)
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
 
   const { data: botData, isLoading: botLoading } = useQuery({
-    queryKey:       ['bot-status'],
-    queryFn:        () => fetch('/api/bot/status').then(r => r.json()),
+    queryKey:        ['bot-status'],
+    queryFn:         () => fetch('/api/bot/status').then(r => r.json()),
     refetchInterval: 5000,
-    // Keep previous data while re-fetching so the pill never flickers to "stopped"
     placeholderData: (prev) => prev,
   })
 
-  const isRunning  = botData?.status === 'running'
-  const runTime    = useRunTimer(isRunning ? botData?.startedAt : null)
+  const status:         string  = botData?.status         ?? 'stopped'
+  const stopMode:       string  = botData?.stopMode       ?? ''
+  const openTradeCount: number  = botData?.openTradeCount ?? 0
+  const timeoutWarning: boolean = botData?.timeoutWarning ?? false
+  const isRunning   = status === 'running'
+  const isStopping  = status === 'stopping'
+  const isCloseAll  = isStopping && stopMode === 'close_all'
+  const isGraceful  = isStopping && stopMode === 'graceful'
+  const runTime     = useRunTimer(isRunning ? botData?.startedAt : null)
 
   const displayName = user?.name || user?.email?.split('@')[0] || 'User'
   const userInitial = displayName.charAt(0).toUpperCase()
 
-  // While the very first fetch is in flight, show a neutral loading pill
-  const pillContent = botLoading && !botData ? (
-    <span className="text-gray-500">Loading…</span>
-  ) : (
-    <>
-      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-        isRunning ? 'bg-brand-500 animate-pulse' : 'bg-gray-600'
-      }`} />
-      <span>Bot {isRunning ? 'Running' : 'Stopped'}</span>
-      {isRunning && botData?.activeMarkets?.length > 0 && (
-        <span className="text-gray-500">· {botData.activeMarkets.join(', ')}</span>
-      )}
-      {isRunning && runTime && (
-        <span className="text-gray-400 tabular-nums">· {runTime}</span>
-      )}
-    </>
-  )
+  const pillConfig = (() => {
+    if (botLoading && !botData) return null
+    if (isRunning) return {
+      classes: 'bg-brand-500/10 border-brand-500/20 text-brand-500',
+      dot:     'bg-brand-500 animate-pulse',
+      label:   'Bot Running',
+      sub:     botData?.activeMarkets?.length > 0
+        ? `· ${botData.activeMarkets.join(', ')}${runTime ? ` · ${runTime}` : ''}`
+        : '',
+    }
+    if (isCloseAll) return {
+      classes: 'bg-red-500/10 border-red-500/20 text-red-400',
+      dot:     `bg-red-400 animate-pulse`,
+      label:   'Closing positions…',
+      sub:     '',
+    }
+    if (isGraceful) return {
+      classes: timeoutWarning
+        ? 'bg-red-500/10 border-red-500/20 text-red-400'
+        : 'bg-amber-500/10 border-amber-500/20 text-amber-400',
+      dot:     timeoutWarning ? 'bg-red-400 animate-pulse' : 'bg-amber-400 animate-pulse',
+      label:   'Draining…',
+      sub:     openTradeCount > 0 ? `· ${openTradeCount} open` : '',
+    }
+    return {
+      classes: 'bg-gray-800 border-gray-700 text-gray-500',
+      dot:     'bg-gray-600',
+      label:   'Bot Stopped',
+      sub:     '',
+    }
+  })()
 
   return (
     <>
       <MobileSidebar open={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />
       <header className="flex items-center justify-between px-4 md:px-6 py-3 border-b border-gray-800 bg-gray-900 flex-shrink-0">
 
-        {/* Mobile menu button */}
         <button
           className="md:hidden flex items-center justify-center w-9 h-9 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors"
           onClick={() => setMobileNavOpen(true)}
@@ -97,14 +112,23 @@ export function TopBar({ user }: TopBarProps) {
           <Menu className="w-5 h-5" />
         </button>
 
-        {/* Bot status pill */}
-        <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
-          isRunning
-            ? 'bg-brand-500/10 border-brand-500/20 text-brand-500'
-            : 'bg-gray-800 border-gray-700 text-gray-500'
-        }`}>
-          {pillContent}
-        </div>
+        {/* Status pill */}
+        {botLoading && !botData ? (
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border bg-gray-800 border-gray-700 text-gray-500">
+            Loading…
+          </div>
+        ) : pillConfig ? (
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${pillConfig.classes}`}>
+            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${pillConfig.dot}`} />
+            <span>{pillConfig.label}</span>
+            {pillConfig.sub && (
+              <span className="opacity-70">{pillConfig.sub}</span>
+            )}
+            {timeoutWarning && isStopping && (
+              <AlertTriangle className="w-3 h-3 ml-0.5" />
+            )}
+          </div>
+        ) : null}
 
         {/* Right side */}
         <div className="flex items-center gap-2">
@@ -112,7 +136,6 @@ export function TopBar({ user }: TopBarProps) {
             <Bell className="w-4 h-4 text-gray-500" />
           </button>
 
-          {/* User menu */}
           <div className="relative">
             <button
               onClick={() => setMenuOpen(!menuOpen)}

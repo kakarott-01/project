@@ -1,23 +1,25 @@
 // app/api/bot/start/route.ts
+// ==========================
+// REVISED: adds Redis distributed locking to prevent duplicate starts
+// across multiple serverless workers.
+
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
 import { botStatuses, botSessions, exchangeApis, marketConfigs } from '@/lib/schema'
-import { eq, and, inArray } from 'drizzle-orm'
-
-// ── In-process lock so rapid double-clicks can't fire two starts ──────────────
-// (One lock per user_id, cleared after the request completes)
-const startLocks = new Set<string>()
+import { eq, and } from 'drizzle-orm'
+import { acquireBotLock } from '@/lib/bot-lock'
 
 export async function POST(req: NextRequest) {
   const session = await auth()
   if (!session?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  // ── Idempotency lock ──────────────────────────────────────────────────────
-  if (startLocks.has(session.id)) {
-    return NextResponse.json({ error: 'Start already in progress' }, { status: 429 })
+  // ── Redis distributed lock ─────────────────────────────────────────────────
+  // Replaces the old in-process Set<string> which was useless across workers.
+  const lock = await acquireBotLock(session.id, 'start')
+  if (!lock.acquired) {
+    return NextResponse.json({ error: lock.reason }, { status: 429 })
   }
-  startLocks.add(session.id)
 
   try {
     const { markets } = await req.json()
@@ -25,31 +27,33 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No markets specified' }, { status: 400 })
     }
 
-    // ── Check if already running ─────────────────────────────────────────────
+    // ── Check if already running or stopping ──────────────────────────────────
     const existing = await db.query.botStatuses.findFirst({
       where: eq(botStatuses.userId, session.id),
       columns: { status: true },
     })
+
     if (existing?.status === 'running') {
       return NextResponse.json({ error: 'Bot is already running' }, { status: 409 })
     }
 
-    // ── Close any stale "running" sessions left over from a crash/restart ────
-    // These are sessions that are still marked running but the bot is stopped.
+    // Prevent start while a stop/drain is in progress
+    if (existing?.status === 'stopping') {
+      return NextResponse.json({
+        error: 'Bot is currently stopping. Wait for it to finish before restarting.',
+      }, { status: 409 })
+    }
+
+    // ── Close stale 'running' sessions from crashes ───────────────────────────
     await db
       .update(botSessions)
-      .set({
-        status:  'stopped',
-        endedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(botSessions.userId, session.id),
-          eq(botSessions.status, 'running'),
-        )
-      )
+      .set({ status: 'stopped', endedAt: new Date() })
+      .where(and(
+        eq(botSessions.userId, session.id),
+        eq(botSessions.status, 'running'),
+      ))
 
-    // ── Validate exchange APIs exist for each market ──────────────────────────
+    // ── Validate exchange APIs ────────────────────────────────────────────────
     const missingMarkets: string[] = []
     for (const market of markets) {
       const api = await db.query.exchangeApis.findFirst({
@@ -65,7 +69,7 @@ export async function POST(req: NextRequest) {
     if (missingMarkets.length > 0) {
       return NextResponse.json(
         { error: `No exchange API configured for: ${missingMarkets.join(', ')}.`, missingMarkets },
-        { status: 400 }
+        { status: 400 },
       )
     }
 
@@ -73,20 +77,19 @@ export async function POST(req: NextRequest) {
     let botRes: Response | null = null
     try {
       botRes = await fetch(`${process.env.BOT_ENGINE_URL}/bot/start`, {
-        method: 'POST',
+        method:  'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-Bot-Secret': process.env.BOT_ENGINE_SECRET!,
         },
-        body: JSON.stringify({ user_id: session.id, markets }),
-        // Short timeout so UI doesn't hang if Render is cold-starting
+        body:   JSON.stringify({ user_id: session.id, markets }),
         signal: AbortSignal.timeout(15_000),
       })
     } catch (err) {
       console.error('Bot engine unreachable:', err)
       return NextResponse.json(
         { error: 'Bot engine is unreachable. Is the Render service running?' },
-        { status: 503 }
+        { status: 503 },
       )
     }
 
@@ -94,7 +97,7 @@ export async function POST(req: NextRequest) {
       const body = await botRes.json().catch(() => ({}))
       return NextResponse.json(
         { error: body.detail ?? 'Bot engine returned an error', detail: body },
-        { status: botRes.status }
+        { status: botRes.status },
       )
     }
 
@@ -139,6 +142,8 @@ export async function POST(req: NextRequest) {
         status:        'running',
         activeMarkets: markets,
         startedAt:     now,
+        stopMode:      null,
+        stoppingAt:    null,
       })
       .onConflictDoUpdate({
         target: botStatuses.userId,
@@ -147,6 +152,8 @@ export async function POST(req: NextRequest) {
           activeMarkets: markets,
           startedAt:     now,
           errorMessage:  null,
+          stopMode:      null,
+          stoppingAt:    null,
           updatedAt:     now,
         },
       })
@@ -154,6 +161,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true, status: 'running', markets, sessionIds })
 
   } finally {
-    startLocks.delete(session.id)
+    await lock.release()
   }
 }
