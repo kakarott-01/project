@@ -1,13 +1,17 @@
 // app/api/bot/status/route.ts
 // ===========================
-// REVISED: exposes stopMode, openTradeCount, stoppingAt, and a
-// timeoutWarning flag so the UI can show alerts when drain takes too long.
+// REVISED: Auto-detects graceful drain completion so the bot transitions
+// to "stopped" the moment all positions close — without relying on the
+// Python→Next.js HTTP callback (which can fail on Render cold starts).
+//
+// Also exposes stopMode, openTradeCount, stoppingAt, and timeoutWarning.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
 import { botStatuses, trades } from '@/lib/schema'
 import { eq, and, sql } from 'drizzle-orm'
+import { _doImmediateStop } from '@/lib/bot-stop'
 
 export async function GET(req: NextRequest) {
   const session = await auth()
@@ -44,6 +48,35 @@ export async function GET(req: NextRequest) {
         eq(trades.status, 'open' as any),
       ))
     openTradeCount = rows[0]?.count ?? 0
+  }
+
+  // ── Auto-detect graceful drain completion ─────────────────────────────────
+  // Primary stop mechanism: does NOT rely on the Python→Next.js callback.
+  // This route is polled every 5 s, so transition is near-instant after the
+  // last position closes. Calling _doImmediateStop is idempotent — subsequent
+  // polls will see status='stopped' in DB and skip this block.
+  if (
+    status.status === 'stopping' &&
+    status.stopMode === 'graceful' &&
+    openTradeCount === 0
+  ) {
+    const now = new Date()
+    try {
+      await _doImmediateStop(session.id, now)
+    } catch (e) {
+      console.error('[bot/status] Auto-stop after drain failed:', e)
+    }
+    return NextResponse.json({
+      status:          'stopped',
+      stopMode:        null,
+      activeMarkets:   [],
+      startedAt:       status.startedAt,
+      stoppingAt:      null,
+      lastHeartbeat:   status.lastHeartbeat,
+      errorMessage:    null,
+      openTradeCount:  0,
+      timeoutWarning:  false,
+    })
   }
 
   // Timeout warning: stopping has been active longer than stop_timeout_sec

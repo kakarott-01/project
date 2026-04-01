@@ -1,23 +1,27 @@
 """
-bot-engine/scheduler.py — REVISED v3
+bot-engine/scheduler.py — REVISED v4
 ======================================
-Key changes from v2:
+Key fix over v3:
 
-1. session_ref now uses the REAL session ID from DB (passed in via
-   session_ids dict), not the placeholder "userId:market" string.
-   This means base_algo._reconcile_positions() correctly matches
-   bot_session_ref when filtering owned trades.
+Drain completion race condition fixed:
+  Previously, when drain detected 0 open trades, it called:
+    asyncio.create_task(_scheduler._complete_stop_callback(_uid))
 
-2. start_user_bot accepts an optional session_ids: Dict[str, str]
-   parameter so the Next.js start route can pass the DB-created
-   session IDs down. Falls back to "userId:market" if not provided
-   (backwards compatible with watchdog auto-restart).
+  _complete_stop_callback updated the DB to 'stopped' THEN scheduled
+  stop_user_bot() as another async task to remove APScheduler jobs.
+  Between the DB update and job removal, APScheduler could fire the
+  next job cycle. That cycle sees get_bot_stop_mode() → None (DB now
+  shows 'stopped', so stop_mode is None), meaning is_draining=False.
+  Any phantom _open_positions entries (see base_algo.py fix) would then
+  trigger new trade openings — causing unexpected losses.
 
-3. Drain mode read from DB (not in-memory flag).
+  Fix: When drain completion is detected inside _wrapped_cycle:
+    1. STOP JOBS FIRST (await _stop_jobs) — prevents any further cycles
+    2. Update DB to stopped
+    3. Notify Next.js for session cleanup (best effort, async)
 
-4. close_all_task: a separate asyncio Task.
-
-5. stop_user_bot: cancels any running close_all task for the user.
+  The Next.js status route also auto-detects drain completion independently
+  (see app/api/bot/status/route.ts) as a belt-and-suspenders fallback.
 """
 
 import asyncio
@@ -59,12 +63,14 @@ MARKET_INTERVAL = {
 class BotContext:
     user_id:         str
     markets:         List[str]
-    session_ids:     Dict[str, str]         = field(default_factory=dict)  # market→sessionId
-    connectors:      Dict[str, object]      = field(default_factory=dict)  # market→connector
+    session_ids:     Dict[str, str]         = field(default_factory=dict)
+    connectors:      Dict[str, object]      = field(default_factory=dict)
     job_ids:         List[str]              = field(default_factory=list)
     started_at:      datetime               = field(default_factory=datetime.utcnow)
     last_heartbeat:  Optional[datetime]     = None
     close_all_task:  Optional[asyncio.Task] = None
+    # Guard flag: prevents multiple concurrent drain-completion callbacks
+    drain_completing: bool                  = False
 
 
 class BotScheduler:
@@ -105,7 +111,7 @@ class BotScheduler:
             markets.extend(ctx.markets)
         return list(set(markets))
 
-    def get_all_contexts(self) -> Dict[str, BotContext]:
+    def get_all_contexts(self) -> Dict[str, "BotContext"]:
         return dict(self.active_bots)
 
     # ── Start ──────────────────────────────────────────────────────────────────
@@ -116,14 +122,6 @@ class BotScheduler:
         markets: List[str],
         session_ids: Optional[Dict[str, str]] = None,
     ):
-        """
-        Start the bot for a user.
-
-        session_ids: optional mapping of market → DB session UUID, passed in
-        from the Next.js /api/bot/start route. When provided, each algo gets
-        the correct session_ref so ownership tracking works properly.
-        Falls back to "userId:market" if not provided (e.g. watchdog restart).
-        """
         logger.info(f"🚀 Starting bot user={user_id} markets={markets}")
 
         await self._stop_jobs(user_id)
@@ -135,7 +133,6 @@ class BotScheduler:
             market_modes     = await self._db.get_market_modes(user_id)
 
             ctx = BotContext(user_id=user_id, markets=[])
-            # Store the session IDs so they are available in the context
             if session_ids:
                 ctx.session_ids = session_ids
 
@@ -165,10 +162,6 @@ class BotScheduler:
                 paper_mode = market_modes.get(market, True)
                 AlgoClass  = ALGO_MAP.get(market, GlobalAlgo)
 
-                # Use the real DB session ID as the ownership tag if available.
-                # Falls back to "userId:market" for watchdog-triggered restarts
-                # where we don't have session IDs (new sessions are created
-                # fresh in that case by the DB layer).
                 real_session_id = (session_ids or {}).get(market)
                 session_ref     = real_session_id if real_session_id else f"{user_id}:{market}"
 
@@ -204,14 +197,56 @@ class BotScheduler:
                         if stop_mode == "graceful":
                             open_count = await _scheduler._db.count_open_trades(_uid)
                             if open_count == 0:
+                                ctx = _scheduler.active_bots.get(_uid)
+                                # Guard against concurrent drain-completion calls
+                                if ctx and ctx.drain_completing:
+                                    logger.debug(
+                                        f"[drain] Completion already in progress for "
+                                        f"user={_uid[:8]}… — skipping duplicate"
+                                    )
+                                    return
+                                if ctx:
+                                    ctx.drain_completing = True
+
                                 logger.info(
                                     f"✅ Drain complete for user={_uid[:8]}… "
-                                    "— all positions closed, stopping"
+                                    "— all positions closed, stopping now"
                                 )
+
+                                # ── CRITICAL FIX: stop jobs FIRST ────────────
+                                # Remove APScheduler jobs BEFORE updating the DB
+                                # to 'stopped'. This closes the race window where
+                                # a new cycle could start after the DB update
+                                # (is_draining would be False) but before the jobs
+                                # are removed — which could trigger new trade entries
+                                # from any phantom _open_positions entries.
+                                await _scheduler._stop_jobs(_uid)
+                                logger.info(
+                                    f"🛑 APScheduler jobs removed for user={_uid[:8]}…"
+                                )
+
+                                # Update DB to stopped
+                                try:
+                                    await _scheduler._db.force_set_status(_uid, "stopped")
+                                    logger.info(
+                                        f"✅ DB status → stopped for user={_uid[:8]}…"
+                                    )
+                                except Exception as e:
+                                    logger.error(
+                                        f"❌ Failed to update DB stop status "
+                                        f"for user={_uid[:8]}…: {e}"
+                                    )
+
+                                # Notify Next.js for bot_sessions cleanup (best effort)
+                                # The Next.js status route also auto-detects drain
+                                # completion independently as a backup.
                                 asyncio.create_task(
                                     _scheduler._complete_stop_callback(_uid),
-                                    name=f"complete_stop_{_uid}",
+                                    name=f"complete_stop_cb_{_uid}",
                                 )
+
+                                clear_ohlcv_cache()
+
                     except Exception as e:
                         logger.error(f"❌ Drain completion check error: {e}")
 
@@ -253,10 +288,6 @@ class BotScheduler:
     # ── Drain (graceful stop) ──────────────────────────────────────────────────
 
     async def enter_drain_mode(self, user_id: str):
-        """
-        No in-memory state needed — algos read DB stop_mode each cycle.
-        This method just logs for observability.
-        """
         logger.info(
             f"🚿 Drain mode signal received for user={user_id[:8]}… "
             "(algos will read DB next cycle)"
@@ -265,12 +296,9 @@ class BotScheduler:
     # ── Close All ──────────────────────────────────────────────────────────────
 
     async def start_close_all(self, user_id: str):
-        """Launch CloseAllEngine as a background asyncio Task."""
         logger.info(f"🔴 Starting close_all for user={user_id[:8]}…")
 
         await self._stop_jobs(user_id)
-
-        ctx = self.active_bots.get(user_id)
 
         exchange_configs = await self._db.get_exchange_apis(user_id)
         market_modes     = await self._db.get_market_modes(user_id)
@@ -299,6 +327,7 @@ class BotScheduler:
             paper_modes=paper_modes,
         )
 
+        ctx = self.active_bots.get(user_id)
         task = asyncio.create_task(
             engine.run(),
             name=f"close_all_{user_id}",
@@ -351,7 +380,11 @@ class BotScheduler:
                 pass
 
     async def _complete_stop_callback(self, user_id: str):
-        """Called when drain detects zero open trades — transitions DB to stopped."""
+        """
+        Notifies Next.js to run bot_sessions cleanup.
+        DB status is already set to 'stopped' before this is called.
+        This is best-effort for session record cleanup only.
+        """
         import httpx, os
         app_url = os.getenv("NEXT_PUBLIC_APP_URL", "")
         if app_url:
@@ -365,10 +398,14 @@ class BotScheduler:
                     logger.info(f"✅ complete-stop callback succeeded for {user_id[:8]}…")
                     return
             except Exception as e:
-                logger.error(f"❌ complete-stop callback failed: {e}")
+                logger.warning(
+                    f"⚠️  complete-stop callback failed for {user_id[:8]}… "
+                    f"(non-fatal, DB already updated): {e}"
+                )
 
+        # Fallback: DB is already stopped (set before this callback was scheduled),
+        # so just ensure local state is clean.
         try:
-            await self._db.force_set_status(user_id, "stopped")
             await self.stop_user_bot(user_id)
         except Exception as e:
-            logger.error(f"❌ Fallback stop also failed: {e}")
+            logger.error(f"❌ Fallback cleanup failed: {e}")

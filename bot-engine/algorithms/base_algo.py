@@ -1,25 +1,31 @@
 """
 bot-engine/algorithms/base_algo.py
 ====================================
-REVISED v2 — production-safe.
+REVISED v3 — two critical drain-mode bugs fixed.
 
-Key improvements over v1:
-1. Drain-mode check is done from DB status (not in-memory scheduler flag).
-   This means it survives restarts — a restarted bot in 'stopping' state
-   correctly resumes drain behaviour without needing the scheduler to
-   reconstruct in-memory state.
+Bug 1 — Phantom _open_positions during drain (caused new trades after stop):
+  Subclass generate_signal() methods call self._open() BEFORE returning a
+  signal, even when the symbol has no open DB trade. In drain mode, these
+  phantom entries persist in _open_positions. When the bot subsequently
+  transitions from 'stopping' → 'stopped' (between the DB update and the
+  APScheduler job removal), a cycle could start with is_draining=False but
+  _open_positions still containing phantom entries. _check_exit() would fire,
+  return an exit signal, _find_open_trade() would return False (no DB trade),
+  and the code would fall through to OPEN A NEW REAL TRADE — causing losses.
 
-2. Race condition fixed: stop/drain check happens AFTER signal generation
-   but BEFORE order placement, not only at cycle start.
+  Fix: During drain mode, skip generate_signal() entirely for symbols that
+  have no open DB position. Only symbols with live DB positions are processed.
 
-3. Position ownership: bot only manages trades it created (bot_session_ref
-   matches current session). Manual exchange trades are never touched.
+Bug 2 — Race between DB stop update and APScheduler job removal:
+  The drain completion previously scheduled stop_user_bot() as a background
+  task. Between the DB update ('stopped') and the task actually running to
+  remove APScheduler jobs, another job cycle could fire with is_draining=False
+  (because DB now shows 'stopped', so _get_bot_stop_mode() returns None) and
+  trigger new trade entries.
 
-4. Startup reconciliation: first cycle cross-checks DB open trades against
-   exchange. Orphaned trades (closed on exchange while bot was down) are
-   marked cancelled in DB.
-
-5. Paper mode reconciliation is skipped (no exchange to reconcile against).
+  Fix: When drain completion is detected inside _wrapped_cycle (scheduler.py),
+  jobs are removed synchronously BEFORE the DB status is updated.
+  (See scheduler.py for that fix.)
 """
 
 import json
@@ -43,16 +49,16 @@ class BaseAlgo(ABC):
         db,
         user_id: str,
         paper_mode: bool = True,
-        session_ref: str = "",   # "{userId}:{sessionId}" — for ownership tagging
+        session_ref: str = "",
     ):
         self.connector    = connector
         self.risk         = risk_mgr
         self.db           = db
         self.user_id      = user_id
         self._paper_mode  = paper_mode
-        self._session_ref = session_ref   # ownership tag
+        self._session_ref = session_ref
 
-        self._reconciled  = False   # True after first-cycle reconciliation
+        self._reconciled  = False
 
         self.config = self._load_config()
         self.name   = self.config.get("algo_name", self.__class__.__name__)
@@ -101,16 +107,10 @@ class BaseAlgo(ABC):
     def market_type(self) -> str: ...
 
     # ── DB-driven stop state check ─────────────────────────────────────────────
-    # Reading from DB (not in-memory) ensures correctness after restart.
 
     async def _get_bot_stop_mode(self) -> Optional[str]:
-        """
-        Returns the current stop mode from DB, or None if running normally.
-        Possible values: 'close_all', 'graceful', None
-        """
         try:
-            row = await self.db.get_bot_stop_mode(self.user_id)
-            return row  # 'graceful' | 'close_all' | None
+            return await self.db.get_bot_stop_mode(self.user_id)
         except Exception as e:
             logger.warning(f"[{self.name}] ⚠️  Could not read stop mode: {e}")
             return None
@@ -118,15 +118,6 @@ class BaseAlgo(ABC):
     # ── Startup reconciliation (live mode only) ────────────────────────────────
 
     async def _reconcile_positions(self):
-        """
-        Cross-checks DB open trades against exchange open orders.
-        Run ONCE on the first cycle.
-
-        Outcomes:
-          - DB open + exchange open → restore to _open_positions (normal)
-          - DB open + exchange closed → mark DB trade cancelled (orphan)
-          - Exchange open + DB missing → log warning, do NOT touch (not our trade)
-        """
         if self._paper_mode:
             self._reconciled = True
             return
@@ -140,12 +131,11 @@ class BaseAlgo(ABC):
                 self._reconciled = True
                 return
 
-            # Filter to only trades this bot session owns
             if self._session_ref:
                 owned = [
                     t for t in db_open
                     if t.get("bot_session_ref") == self._session_ref
-                       or t.get("bot_session_ref") is None  # legacy trades have no ref
+                       or t.get("bot_session_ref") is None
                 ]
             else:
                 owned = db_open
@@ -169,7 +159,6 @@ class BaseAlgo(ABC):
             for trade in owned:
                 symbol = trade["symbol"]
                 if symbol not in exchange_symbols:
-                    # Position closed on exchange while bot was down
                     logger.warning(
                         f"[{self.name}] 🔍 Orphan: {symbol} id={trade['id']} "
                         "not found on exchange — marking cancelled"
@@ -190,7 +179,6 @@ class BaseAlgo(ABC):
     # ── Main execution loop ────────────────────────────────────────────────────
 
     async def run_cycle(self):
-        """Safe wrapper — exceptions are caught to keep APScheduler job alive."""
         try:
             await self._run_cycle_inner()
         except Exception as e:
@@ -201,7 +189,6 @@ class BaseAlgo(ABC):
                 pass
 
     async def _run_cycle_inner(self):
-        # ── Step 0: First-cycle reconciliation ────────────────────────────────
         if not self._reconciled:
             await self._reconcile_positions()
 
@@ -211,13 +198,10 @@ class BaseAlgo(ABC):
             logger.info(f"[{self.name}] 🚫 Disabled by config")
             return
 
-        # ── Step 1: Read stop mode from DB ─────────────────────────────────────
         stop_mode = await self._get_bot_stop_mode()
-        is_draining   = stop_mode == "graceful"
+        is_draining    = stop_mode == "graceful"
         is_closing_all = stop_mode == "close_all"
 
-        # close_all is handled by CloseAllEngine, not algo cycles.
-        # If we somehow reach this point during close_all, skip.
         if is_closing_all:
             logger.info(f"[{self.name}] ⏸  close_all in progress — skipping cycle")
             return
@@ -240,6 +224,31 @@ class BaseAlgo(ABC):
             return
 
         for symbol in self.get_symbols():
+
+            # ── DRAIN MODE: only process symbols with an open DB position ─────
+            # This is the critical fix for phantom _open_positions:
+            #
+            # Without this guard, generate_signal() is called for ALL symbols.
+            # Most subclass implementations call self._open() inside
+            # generate_signal() BEFORE returning the signal (e.g. CryptoAlgo,
+            # IndianMarketsAlgo). This adds a phantom entry to _open_positions
+            # even though no DB trade exists. When the bot transitions from
+            # 'stopping' → 'stopped' (DB update vs job removal race window),
+            # the next cycle sees is_draining=False but _open_positions still
+            # contains the phantom entry. _check_exit() fires, _find_open_trade()
+            # returns False, and a NEW REAL TRADE IS OPENED — causing losses.
+            #
+            # Fix: skip generate_signal() entirely for symbols that have no
+            # open trade in the DB. Only exit-eligible symbols are processed.
+            if is_draining:
+                has_open, _, _, _ = await self._find_open_trade(symbol)
+                if not has_open:
+                    logger.debug(
+                        f"[{self.name}] 🚿 {symbol}: no open position — "
+                        "skipping signal generation during drain"
+                    )
+                    continue
+
             await self._process_symbol(symbol, balance, is_draining=is_draining)
 
     # ── Per-symbol processing ──────────────────────────────────────────────────
@@ -262,16 +271,13 @@ class BaseAlgo(ABC):
                 await self._find_open_trade(symbol)
 
             if is_exit and open_trade_id:
-                # ── Always process exits — even during drain ──────────────────
                 await self._close_trade(
                     symbol, signal, open_trade_id,
                     open_entry_price, open_side, balance
                 )
                 return
 
-            # ── New entry: BLOCKED during drain ───────────────────────────────
-            # Re-check stop mode HERE (after signal gen) to close the race window
-            # where stop fires between generate_signal() and order placement.
+            # New entry blocked during drain
             if is_draining:
                 logger.info(f"[{self.name}] 🚿 {symbol}: blocking new entry (drain mode)")
                 return
@@ -285,7 +291,6 @@ class BaseAlgo(ABC):
                 )
                 return
 
-            # ── Normal entry ──────────────────────────────────────────────────
             can_trade, reason = self.risk.can_trade(balance)
             if not can_trade:
                 logger.info(f"[{self.name}] ⛔ {symbol}: {reason}")
