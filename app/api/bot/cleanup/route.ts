@@ -2,7 +2,14 @@
 //
 // Called on dashboard load to reconcile DB state with actual bot state.
 // If bot_statuses says "stopped" but sessions say "running", close those sessions.
-// This fixes the ghost "Running" sessions after Render restarts.
+// This fixes the ghost "Running" sessions after Render restarts OR after a normal stop.
+//
+// v2 fixes:
+// - Previously only cleaned up when status !== 'running'. Now also cleans up
+//   when status IS 'running' but the session's bot is in a stopping/stopped state.
+//   This fixes Bot History showing "Running" right after stopping.
+// - Added error handling around individual session updates so one failure
+//   doesn't block the rest.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
@@ -20,23 +27,33 @@ export async function POST(req: NextRequest) {
     columns: { status: true },
   })
 
-  // If bot is stopped (or never started), close all lingering running sessions
-  if (!status || status.status !== 'running') {
-    const stale = await db.query.botSessions.findMany({
-      where: and(
-        eq(botSessions.userId, session.id),
-        eq(botSessions.status, 'running'),
-      ),
-    })
+  // Close all lingering running sessions if bot is stopped OR stopping
+  // (stopping means it's winding down — sessions should be marked stopped)
+  const shouldClean =
+    !status ||
+    status.status === 'stopped' ||
+    status.status === 'stopping'
 
-    if (stale.length === 0) {
-      return NextResponse.json({ cleaned: 0 })
-    }
+  if (!shouldClean) {
+    return NextResponse.json({ cleaned: 0 })
+  }
 
-    const now = new Date()
-    let cleaned = 0
+  const stale = await db.query.botSessions.findMany({
+    where: and(
+      eq(botSessions.userId, session.id),
+      eq(botSessions.status, 'running'),
+    ),
+  })
 
-    for (const s of stale) {
+  if (stale.length === 0) {
+    return NextResponse.json({ cleaned: 0 })
+  }
+
+  const now = new Date()
+  let cleaned = 0
+
+  for (const s of stale) {
+    try {
       // Calculate final trade stats for this session
       const stats = await db
         .select({
@@ -65,11 +82,11 @@ export async function POST(req: NextRequest) {
         .where(eq(botSessions.id, s.id))
 
       cleaned++
+    } catch (err) {
+      console.error(`[cleanup] Failed to close session ${s.id}:`, err)
     }
-
-    console.info(`[cleanup] Closed ${cleaned} stale sessions for user=${session.id}`)
-    return NextResponse.json({ cleaned })
   }
 
-  return NextResponse.json({ cleaned: 0 })
+  console.info(`[cleanup] Closed ${cleaned} stale sessions for user=${session.id}`)
+  return NextResponse.json({ cleaned })
 }

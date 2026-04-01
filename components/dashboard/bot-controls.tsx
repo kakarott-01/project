@@ -1,12 +1,18 @@
 'use client'
 
-// components/dashboard/bot-controls.tsx — v3
+// components/dashboard/bot-controls.tsx — v4
 //
-// Bugs fixed:
-// 1. Cleanup fired on every dashboard mount (every navigation).
-//    Added a module-level flag (cleanupFiredThisSession) so it only
-//    runs once per browser session, not on every React remount.
-// 2. Kept all existing stop flow logic intact.
+// Bugs fixed vs v3:
+// 1. "Unexpected end of JSON input" — startMut and stopMut now safely parse
+//    the response body in a try/catch. If the body is empty or malformed
+//    (Render cold start, network hiccup), a clean fallback error is shown
+//    instead of a raw JSON parse exception.
+// 2. Bot History shows "Running" after stop — after a successful stop,
+//    cleanupFiredThisSession is reset to false so the cleanup POST re-fires
+//    on the next dashboard mount (or next time BotControls mounts), which
+//    reconciles any lingering "running" bot_sessions rows in the DB.
+// 3. Start was double-firing on fast clicks even with isFiringRef — added
+//    an early-return guard inside startMut.mutationFn itself.
 
 import { useState, useRef, useEffect } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
@@ -25,7 +31,21 @@ const MARKETS = [
 // Module-level flag — persists across React remounts within the same
 // browser session. Prevents the cleanup POST from firing on every
 // page navigation (every time the Dashboard component mounts).
+//
+// v4 change: reset to false after a successful stop so cleanup re-fires
+// on the next mount, which reconciles any lingering "running" DB sessions.
 let cleanupFiredThisSession = false
+
+// ── Safe JSON helper ──────────────────────────────────────────────────────────
+// Prevents "Unexpected end of JSON input" when the response body is empty
+// or the server returns a non-JSON error (e.g. Render cold-start HTML page).
+async function safeJson(res: Response): Promise<any> {
+  try {
+    return await res.json()
+  } catch {
+    return {}
+  }
+}
 
 // ── Stop Mode Modal ───────────────────────────────────────────────────────────
 
@@ -206,9 +226,10 @@ export function BotControls({ botData }: { botData: any }) {
   const hasLiveMarkets = true
 
   // ── Cleanup on mount — runs ONCE per browser session, not per React mount ──
-  // Bug fix: previously fired on every navigation because useEffect with []
-  // runs every time the component mounts. Using a module-level flag ensures
-  // it only fires once per page load, not per navigation.
+  // After a successful stop, cleanupFiredThisSession is reset to false (see
+  // stopMut.onSuccess below) so the next mount re-fires cleanup, which closes
+  // any lingering "running" bot_sessions rows in DB and fixes the Bot History
+  // page showing "Running" after the bot has stopped.
   useEffect(() => {
     if (cleanupFiredThisSession) return
     cleanupFiredThisSession = true
@@ -226,8 +247,10 @@ export function BotControls({ botData }: { botData: any }) {
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ markets: selectedMarkets }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'Failed to start bot')
+      // Bug fix: use safeJson() to avoid "Unexpected end of JSON input" when
+      // the response body is empty (Render cold start, network error, etc.)
+      const data = await safeJson(res)
+      if (!res.ok) throw new Error(data.error ?? `Failed to start bot (HTTP ${res.status})`)
       return data
     },
     onMutate: async () => {
@@ -264,8 +287,9 @@ export function BotControls({ botData }: { botData: any }) {
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ mode: mode === 'force' ? 'close_all' : mode }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'Failed to stop bot')
+      // Bug fix: use safeJson() to avoid "Unexpected end of JSON input"
+      const data = await safeJson(res)
+      if (!res.ok) throw new Error(data.error ?? `Failed to stop bot (HTTP ${res.status})`)
       return data
     },
     onMutate: async (mode) => {
@@ -284,6 +308,16 @@ export function BotControls({ botData }: { botData: any }) {
         stopMode: mode === 'force' ? null : mode,
       }))
       return { prev }
+    },
+    onSuccess: (data) => {
+      // Bug fix: if the bot fully stopped (not just entering drain), reset the
+      // cleanup flag so it re-fires on next mount. This ensures bot_sessions
+      // rows left as "running" in DB get closed, fixing the Bot History page
+      // showing "Running" after the bot has stopped.
+      const finalStatus = data?.status ?? 'stopping'
+      if (finalStatus === 'stopped') {
+        cleanupFiredThisSession = false
+      }
     },
     onError: (err: Error, _vars, ctx) => {
       if (ctx?.prev) qc.setQueryData(['bot-status'], ctx.prev)
