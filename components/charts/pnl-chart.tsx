@@ -11,7 +11,9 @@ interface Props { trades: any[] }
 export function PnlChart({ trades }: Props) {
   const data = useMemo(() => {
     const closed = trades
-      .filter(t => t.status === 'closed' && t.pnl != null)
+      // FIX M: added `&& t.closedAt != null` — prevents new Date(null) = epoch
+      // which silently corrupted the sort and produced a flat line at 0
+      .filter(t => t.status === 'closed' && t.pnl != null && t.closedAt != null)
       .sort((a, b) => new Date(a.closedAt).getTime() - new Date(b.closedAt).getTime())
 
     let cumulative = 0

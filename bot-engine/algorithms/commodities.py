@@ -1,10 +1,8 @@
 """
-bot-engine/algorithms/commodities.py
-======================================
-Fixed CommoditiesAlgo.
-
-Added restart recovery: re-syncs open positions from DB on first
-cycle per symbol so Render restarts don't cause duplicate opens.
+bot-engine/algorithms/commodities.py — v2
+==========================================
+FIX E: self._open() replaced with self._stage_open() for new entries.
+All algorithm logic unchanged.
 """
 
 import pandas as pd
@@ -25,7 +23,8 @@ class CommoditiesAlgo(BaseAlgo):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._open_positions: Dict[str, Dict] = {}
-        self._db_synced: set = set()
+        self._db_synced:      set = set()
+        self._staged_open:    Dict[str, Dict] = {}
 
     @property
     def market_type(self) -> str:
@@ -80,13 +79,27 @@ class CommoditiesAlgo(BaseAlgo):
     def _has_position(self, symbol: str) -> bool:
         return symbol in self._open_positions
 
-    def _open(self, symbol: str, signal: str, price: float):
-        self._open_positions[symbol] = {
+    def _stage_open(self, symbol: str, signal: str, price: float):
+        self._staged_open[symbol] = {
             "signal":      signal,
             "entry_price": price,
             "opened_at":   datetime.utcnow(),
         }
-        logger.info(f"📂 Position opened: {signal} {symbol} @ {price:.4f}")
+        logger.info(f"📋 Open staged (pending DB): {signal} {symbol} @ {price:.4f}")
+
+    def _confirm_staged_open(self, symbol: str):
+        pending = self._staged_open.pop(symbol, None)
+        if pending:
+            self._open_positions[symbol] = pending
+            logger.info(
+                f"📂 Position confirmed: {pending['signal']} {symbol} "
+                f"@ {pending['entry_price']:.4f}"
+            )
+
+    def _discard_staged_open(self, symbol: str):
+        discarded = self._staged_open.pop(symbol, None)
+        if discarded:
+            logger.warning(f"🚫 Staged open discarded for {symbol} (duplicate blocked)")
 
     def _close(self, symbol: str, reason: str):
         pos = self._open_positions.pop(symbol, None)
@@ -97,13 +110,11 @@ class CommoditiesAlgo(BaseAlgo):
             )
 
     async def generate_signal(self, symbol: str) -> Optional[str]:
-        # ── Step 0: Re-sync from DB after restart ─────────────────────────
         await self._sync_position_from_db(symbol)
 
         if not self._is_trading_time():
             return None
 
-        # ── Exit check for open positions ──────────────────────────────────
         if self._has_position(symbol):
             return await self._check_exit(symbol)
 
@@ -129,10 +140,10 @@ class CommoditiesAlgo(BaseAlgo):
         close = float(curr["close"])
 
         if crossed_up and close > curr["vwap"] and curr["macd_hist"] > 0:
-            self._open(symbol, "BUY", close)
+            self._stage_open(symbol, "BUY", close)  # FIX E
             return "BUY"
         if crossed_down and close < curr["vwap"]:
-            self._open(symbol, "SELL", close)
+            self._stage_open(symbol, "SELL", close)  # FIX E
             return "SELL"
 
         return None
@@ -157,26 +168,18 @@ class CommoditiesAlgo(BaseAlgo):
         if side == "BUY":
             pnl_pct = ((close - entry) / entry) * 100
             if pnl_pct >= tp_pct:
-                self._close(symbol, f"TP +{pnl_pct:.2f}%")
-                return "SELL"
+                self._close(symbol, f"TP +{pnl_pct:.2f}%"); return "SELL"
             if pnl_pct <= -sl_pct:
-                self._close(symbol, f"SL {pnl_pct:.2f}%")
-                return "SELL"
-            # Time limit: 4h
+                self._close(symbol, f"SL {pnl_pct:.2f}%"); return "SELL"
             if (datetime.utcnow() - opened_at) > timedelta(hours=4):
-                self._close(symbol, "time limit 4h")
-                return "SELL"
-
+                self._close(symbol, "time limit 4h"); return "SELL"
         elif side == "SELL":
             pnl_pct = ((entry - close) / entry) * 100
             if pnl_pct >= tp_pct:
-                self._close(symbol, f"TP +{pnl_pct:.2f}%")
-                return "BUY"
+                self._close(symbol, f"TP +{pnl_pct:.2f}%"); return "BUY"
             if pnl_pct <= -sl_pct:
-                self._close(symbol, f"SL {pnl_pct:.2f}%")
-                return "BUY"
+                self._close(symbol, f"SL {pnl_pct:.2f}%"); return "BUY"
             if (datetime.utcnow() - opened_at) > timedelta(hours=4):
-                self._close(symbol, "time limit 4h")
-                return "BUY"
+                self._close(symbol, "time limit 4h"); return "BUY"
 
         return None

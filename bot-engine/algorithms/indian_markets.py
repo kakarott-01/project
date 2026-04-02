@@ -1,10 +1,11 @@
 """
-bot-engine/algorithms/indian_markets.py
-========================================
-Fixed IndianMarketsAlgo.
+bot-engine/algorithms/indian_markets.py — v2
+=============================================
+FIX E: self._open() replaced with self._stage_open() for new entries.
+       self._confirm_staged_open() / self._discard_staged_open() added.
+       base_algo._process_symbol() calls these after the DB save result.
 
-Added restart recovery: re-syncs open positions from DB on first
-cycle per symbol so Render restarts don't cause duplicate opens.
+All algorithm logic unchanged.
 """
 
 import pandas as pd
@@ -25,9 +26,9 @@ class IndianMarketsAlgo(BaseAlgo):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # {symbol: {"signal": "SELL"|"BUY", "entry_price": float, "opened_at": datetime}}
         self._open_positions: Dict[str, Dict] = {}
-        self._db_synced: set = set()
+        self._db_synced:      set = set()
+        self._staged_open:    Dict[str, Dict] = {}
 
     @property
     def market_type(self) -> str:
@@ -42,9 +43,9 @@ class IndianMarketsAlgo(BaseAlgo):
     def _is_trading_time(self):
         now = datetime.now(IST).strftime("%H:%M")
         if now >= "15:15":
-            return False, True   # square-off time
+            return False, True
         if now < "09:20":
-            return False, False  # pre-market
+            return False, False
         return True, False
 
     # ── DB re-sync after restart ──────────────────────────────────────────────
@@ -78,13 +79,28 @@ class IndianMarketsAlgo(BaseAlgo):
     def _has_position(self, symbol: str) -> bool:
         return symbol in self._open_positions
 
-    def _open(self, symbol: str, signal: str, price: float):
-        self._open_positions[symbol] = {
+    def _stage_open(self, symbol: str, signal: str, price: float):
+        """Stage a pending open. Does NOT touch _open_positions."""
+        self._staged_open[symbol] = {
             "signal":      signal,
             "entry_price": price,
             "opened_at":   datetime.utcnow(),
         }
-        logger.info(f"📂 Position opened: {signal} {symbol} @ {price:.4f}")
+        logger.info(f"📋 Open staged (pending DB): {signal} {symbol} @ {price:.4f}")
+
+    def _confirm_staged_open(self, symbol: str):
+        pending = self._staged_open.pop(symbol, None)
+        if pending:
+            self._open_positions[symbol] = pending
+            logger.info(
+                f"📂 Position confirmed: {pending['signal']} {symbol} "
+                f"@ {pending['entry_price']:.4f}"
+            )
+
+    def _discard_staged_open(self, symbol: str):
+        discarded = self._staged_open.pop(symbol, None)
+        if discarded:
+            logger.warning(f"🚫 Staged open discarded for {symbol} (duplicate blocked)")
 
     def _close(self, symbol: str, reason: str):
         pos = self._open_positions.pop(symbol, None)
@@ -95,12 +111,10 @@ class IndianMarketsAlgo(BaseAlgo):
             )
 
     async def generate_signal(self, symbol: str) -> Optional[str]:
-        # ── Step 0: Re-sync from DB after restart ─────────────────────────
         await self._sync_position_from_db(symbol)
 
         can_trade, square_off = self._is_trading_time()
 
-        # Force-close all positions at end of day
         if square_off:
             if self._has_position(symbol):
                 pos = self._open_positions[symbol]
@@ -111,7 +125,6 @@ class IndianMarketsAlgo(BaseAlgo):
         if not can_trade:
             return None
 
-        # ── Exit check for open positions ──────────────────────────────────
         if self._has_position(symbol):
             return await self._check_exit(symbol)
 
@@ -135,10 +148,10 @@ class IndianMarketsAlgo(BaseAlgo):
         vol_spike  = curr["volume"] > curr["vol_avg"] * 1.5
 
         if cross_up and curr["rsi"] > 50 and vol_spike:
-            self._open(symbol, "BUY", float(curr["close"]))
+            self._stage_open(symbol, "BUY", float(curr["close"]))  # FIX E
             return "BUY"
         if cross_down and curr["rsi"] < 50:
-            self._open(symbol, "SELL", float(curr["close"]))
+            self._stage_open(symbol, "SELL", float(curr["close"]))  # FIX E
             return "SELL"
 
         return None
@@ -162,19 +175,14 @@ class IndianMarketsAlgo(BaseAlgo):
         if side == "BUY":
             pnl_pct = ((close - entry) / entry) * 100
             if pnl_pct >= tp_pct:
-                self._close(symbol, f"TP +{pnl_pct:.2f}%")
-                return "SELL"
+                self._close(symbol, f"TP +{pnl_pct:.2f}%"); return "SELL"
             if pnl_pct <= -sl_pct:
-                self._close(symbol, f"SL {pnl_pct:.2f}%")
-                return "SELL"
-
+                self._close(symbol, f"SL {pnl_pct:.2f}%"); return "SELL"
         elif side == "SELL":
             pnl_pct = ((entry - close) / entry) * 100
             if pnl_pct >= tp_pct:
-                self._close(symbol, f"TP +{pnl_pct:.2f}%")
-                return "BUY"
+                self._close(symbol, f"TP +{pnl_pct:.2f}%"); return "BUY"
             if pnl_pct <= -sl_pct:
-                self._close(symbol, f"SL {pnl_pct:.2f}%")
-                return "BUY"
+                self._close(symbol, f"SL {pnl_pct:.2f}%"); return "BUY"
 
         return None

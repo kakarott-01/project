@@ -1,20 +1,17 @@
-// app/api/bot/start/route.ts
-// ==========================
-// Bugs fixed:
-// 1. Session rows are now created BEFORE the bot engine call. Previously they
-//    were created after — if the engine call timed out (15s), bot_statuses
-//    was set to 'running' but no session records existed, creating a phantom
-//    "running" state. Now sessions are cleaned up on engine failure.
-// 2. Session IDs are passed to the engine start request so the Python
-//    scheduler can use the real DB session UUID as session_ref (for trade
-//    ownership tracking in reconciliation).
-// 3. Redis distributed lock prevents duplicate starts across serverless workers.
+// app/api/bot/start/route.ts — v2
+// =================================
+// PERF Q: Exchange API is now fetched ONCE with findMany() and filtered
+//         in memory, instead of one findFirst() per market in two separate
+//         loops. Eliminates N duplicate round-trips to Neon on bot start.
+//
+// All other logic from v1 unchanged (session creation before engine call,
+// Redis distributed lock, stale session cleanup, engine error rollback).
 
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
 import { botStatuses, botSessions, exchangeApis, marketConfigs } from '@/lib/schema'
-import { eq, and } from 'drizzle-orm'
+import { eq, and, inArray } from 'drizzle-orm'
 import { acquireBotLock } from '@/lib/bot-lock'
 
 export async function POST(req: NextRequest) {
@@ -28,8 +25,10 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { markets } = await req.json()
-    if (!markets || markets.length === 0) {
+    const body = await req.json().catch(() => ({}))
+    const { markets } = body
+
+    if (!markets || !Array.isArray(markets) || markets.length === 0) {
       return NextResponse.json({ error: 'No markets specified' }, { status: 400 })
     }
 
@@ -58,17 +57,43 @@ export async function POST(req: NextRequest) {
         eq(botSessions.status, 'running'),
       ))
 
-    // ── Validate exchange APIs ────────────────────────────────────────────────
-    const missingMarkets: string[] = []
-    for (const market of markets) {
-      const api = await db.query.exchangeApis.findFirst({
+    // PERF Q: Fetch ALL exchange APIs for this user in ONE query,
+    // then filter in-memory per market. Previously this was N findFirst()
+    // calls in a loop — one per market, twice (validation + session creation).
+    const [allApis, allConfigs] = await Promise.all([
+      db.query.exchangeApis.findMany({
         where: and(
           eq(exchangeApis.userId, session.id),
-          eq(exchangeApis.marketType, market as any),
           eq(exchangeApis.isActive, true),
         ),
-      })
-      if (!api) missingMarkets.push(market)
+        columns: {
+          id:           true,
+          marketType:   true,
+          exchangeName: true,
+        },
+      }),
+      db.query.marketConfigs.findMany({
+        where: and(
+          eq(marketConfigs.userId, session.id),
+          inArray(marketConfigs.marketType, markets as any[]),
+        ),
+        columns: {
+          marketType: true,
+          mode:       true,
+        },
+      }),
+    ])
+
+    // Build lookup maps for O(1) access in the loop below
+    const apiByMarket    = new Map(allApis.map(a => [a.marketType, a]))
+    const configByMarket = new Map(allConfigs.map(c => [c.marketType, c]))
+
+    // ── Validate that each requested market has an exchange API configured ────
+    const missingMarkets: string[] = []
+    for (const market of markets) {
+      if (!apiByMarket.has(market)) {
+        missingMarkets.push(market)
+      }
     }
 
     if (missingMarkets.length > 0) {
@@ -81,36 +106,19 @@ export async function POST(req: NextRequest) {
     const now = new Date()
 
     // ── Create sessions BEFORE calling the engine ─────────────────────────────
-    // Bug fix: previously sessions were created after the engine call. If the
-    // engine call timed out, bot_statuses was set to 'running' with no session
-    // records, causing a phantom running state. Now we create sessions first
-    // and clean them up if the engine call fails.
+    // Sessions are created first so if the engine call fails, we can roll back.
     const sessionIds: Record<string, string> = {}
     const createdSessionIds: string[] = []
 
     for (const market of markets) {
-      const api = await db.query.exchangeApis.findFirst({
-        where: and(
-          eq(exchangeApis.userId, session.id),
-          eq(exchangeApis.marketType, market as any),
-          eq(exchangeApis.isActive, true),
-        ),
-        columns: { exchangeName: true },
-      })
-
-      const cfg = await db.query.marketConfigs.findFirst({
-        where: and(
-          eq(marketConfigs.userId, session.id),
-          eq(marketConfigs.marketType, market as any),
-        ),
-        columns: { mode: true },
-      })
+      const api    = apiByMarket.get(market)
+      const config = configByMarket.get(market)
 
       const [newSession] = await db.insert(botSessions).values({
         userId:    session.id,
         exchange:  api?.exchangeName ?? 'unknown',
         market,
-        mode:      cfg?.mode ?? 'paper',
+        mode:      config?.mode ?? 'paper',
         status:    'running',
         startedAt: now,
       }).returning({ id: botSessions.id })
@@ -128,14 +136,12 @@ export async function POST(req: NextRequest) {
           'Content-Type': 'application/json',
           'X-Bot-Secret': process.env.BOT_ENGINE_SECRET!,
         },
-        // Pass session_ids so the Python scheduler uses real DB UUIDs as
-        // session_ref for trade ownership tracking
         body:   JSON.stringify({ user_id: session.id, markets, session_ids: sessionIds }),
         signal: AbortSignal.timeout(15_000),
       })
     } catch (err) {
       console.error('Bot engine unreachable:', err)
-      // Clean up the sessions we just created since the bot didn't start
+      // Roll back sessions
       for (const sid of createdSessionIds) {
         await db.update(botSessions)
           .set({ status: 'stopped', endedAt: new Date() })
@@ -148,15 +154,15 @@ export async function POST(req: NextRequest) {
     }
 
     if (!botRes.ok) {
-      const body = await botRes.json().catch(() => ({}))
-      // Clean up sessions on engine error
+      const engineBody = await botRes.json().catch(() => ({}))
+      // Roll back sessions on engine error
       for (const sid of createdSessionIds) {
         await db.update(botSessions)
           .set({ status: 'stopped', endedAt: new Date() })
           .where(eq(botSessions.id, sid))
       }
       return NextResponse.json(
-        { error: body.detail ?? 'Bot engine returned an error', detail: body },
+        { error: engineBody.detail ?? 'Bot engine returned an error', detail: engineBody },
         { status: botRes.status },
       )
     }

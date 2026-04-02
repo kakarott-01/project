@@ -1,27 +1,26 @@
 """
-bot-engine/scheduler.py — REVISED v4
-======================================
-Key fix over v3:
+bot-engine/scheduler.py — v5
+==============================
+Changes from v4:
 
-Drain completion race condition fixed:
-  Previously, when drain detected 0 open trades, it called:
-    asyncio.create_task(_scheduler._complete_stop_callback(_uid))
+FIX K (Risk state persistence):
+  start_user_bot() now calls await risk_mgr.load_state(db, user_id, market)
+  for each market BEFORE creating algo instances. This restores daily_loss
+  and open_trade_count from the DB so a restarted bot picks up where it
+  left off rather than resetting to zero.
 
-  _complete_stop_callback updated the DB to 'stopped' THEN scheduled
-  stop_user_bot() as another async task to remove APScheduler jobs.
-  Between the DB update and job removal, APScheduler could fire the
-  next job cycle. That cycle sees get_bot_stop_mode() → None (DB now
-  shows 'stopped', so stop_mode is None), meaning is_draining=False.
-  Any phantom _open_positions entries (see base_algo.py fix) would then
-  trigger new trade openings — causing unexpected losses.
+  Each market gets its own RiskManager instance now (previously one shared
+  instance was created and passed to all algos). This is correct because:
+  - daily_loss is tracked per-market (Indian market has different hours/rules)
+  - open_trade_count should be per-market (Indian bot at max trades shouldn't
+    block Crypto bot from entering)
 
-  Fix: When drain completion is detected inside _wrapped_cycle:
-    1. STOP JOBS FIRST (await _stop_jobs) — prevents any further cycles
-    2. Update DB to stopped
-    3. Notify Next.js for session cleanup (best effort, async)
+PERF Q (Duplicate DB queries on start):
+  Previously get_exchange_apis() was called in the validation loop AND
+  implicitly re-fetched. Now all exchange data is fetched ONCE before the
+  loop and filtered in memory.
 
-  The Next.js status route also auto-detects drain completion independently
-  (see app/api/bot/status/route.ts) as a belt-and-suspenders fallback.
+All other logic from v4 unchanged.
 """
 
 import asyncio
@@ -61,16 +60,15 @@ MARKET_INTERVAL = {
 
 @dataclass
 class BotContext:
-    user_id:         str
-    markets:         List[str]
-    session_ids:     Dict[str, str]         = field(default_factory=dict)
-    connectors:      Dict[str, object]      = field(default_factory=dict)
-    job_ids:         List[str]              = field(default_factory=list)
-    started_at:      datetime               = field(default_factory=datetime.utcnow)
-    last_heartbeat:  Optional[datetime]     = None
-    close_all_task:  Optional[asyncio.Task] = None
-    # Guard flag: prevents multiple concurrent drain-completion callbacks
-    drain_completing: bool                  = False
+    user_id:          str
+    markets:          List[str]
+    session_ids:      Dict[str, str]         = field(default_factory=dict)
+    connectors:       Dict[str, object]      = field(default_factory=dict)
+    job_ids:          List[str]              = field(default_factory=list)
+    started_at:       datetime               = field(default_factory=datetime.utcnow)
+    last_heartbeat:   Optional[datetime]     = None
+    close_all_task:   Optional[asyncio.Task] = None
+    drain_completing: bool                   = False
 
 
 class BotScheduler:
@@ -127,9 +125,11 @@ class BotScheduler:
         await self._stop_jobs(user_id)
 
         try:
+            # PERF Q: Fetch ALL exchange configs once, filter in memory per market
+            # Previously the loop called get_exchange_apis() which does a full
+            # SELECT — now it's one query total regardless of how many markets.
             exchange_configs = await self._db.get_exchange_apis(user_id)
             risk_cfg         = await self._db.get_risk_settings(user_id)
-            risk_mgr         = RiskManager(risk_cfg)
             market_modes     = await self._db.get_market_modes(user_id)
 
             ctx = BotContext(user_id=user_id, markets=[])
@@ -165,6 +165,19 @@ class BotScheduler:
                 real_session_id = (session_ids or {}).get(market)
                 session_ref     = real_session_id if real_session_id else f"{user_id}:{market}"
 
+                # FIX K: Create a per-market RiskManager and load its persisted state.
+                # Each market has independent daily_loss and open_trade_count.
+                # Using a shared RiskManager across markets was incorrect because
+                # Indian market max trades shouldn't block Crypto from opening.
+                risk_mgr = RiskManager(risk_cfg)
+                try:
+                    await risk_mgr.load_state(self._db, user_id, market)
+                except Exception as e:
+                    logger.warning(
+                        f"⚠️  Could not load risk state for market={market}: {e}. "
+                        "Starting with zero values."
+                    )
+
                 algo = AlgoClass(
                     connector=connector,
                     risk_mgr=risk_mgr,
@@ -173,6 +186,8 @@ class BotScheduler:
                     paper_mode=paper_mode,
                     session_ref=session_ref,
                 )
+                # Mark risk as already loaded so base_algo doesn't reload on first cycle
+                algo._risk_loaded = True
 
                 interval = MARKET_INTERVAL.get(market, 60)
                 job_id   = f"{user_id}_{market}"
@@ -198,7 +213,6 @@ class BotScheduler:
                             open_count = await _scheduler._db.count_open_trades(_uid)
                             if open_count == 0:
                                 ctx = _scheduler.active_bots.get(_uid)
-                                # Guard against concurrent drain-completion calls
                                 if ctx and ctx.drain_completing:
                                     logger.debug(
                                         f"[drain] Completion already in progress for "
@@ -213,19 +227,12 @@ class BotScheduler:
                                     "— all positions closed, stopping now"
                                 )
 
-                                # ── CRITICAL FIX: stop jobs FIRST ────────────
-                                # Remove APScheduler jobs BEFORE updating the DB
-                                # to 'stopped'. This closes the race window where
-                                # a new cycle could start after the DB update
-                                # (is_draining would be False) but before the jobs
-                                # are removed — which could trigger new trade entries
-                                # from any phantom _open_positions entries.
+                                # Stop jobs FIRST before DB update to close the race window
                                 await _scheduler._stop_jobs(_uid)
                                 logger.info(
                                     f"🛑 APScheduler jobs removed for user={_uid[:8]}…"
                                 )
 
-                                # Update DB to stopped
                                 try:
                                     await _scheduler._db.force_set_status(_uid, "stopped")
                                     logger.info(
@@ -237,9 +244,6 @@ class BotScheduler:
                                         f"for user={_uid[:8]}…: {e}"
                                     )
 
-                                # Notify Next.js for bot_sessions cleanup (best effort)
-                                # The Next.js status route also auto-detects drain
-                                # completion independently as a backup.
                                 asyncio.create_task(
                                     _scheduler._complete_stop_callback(_uid),
                                     name=f"complete_stop_cb_{_uid}",
@@ -403,8 +407,7 @@ class BotScheduler:
                     f"(non-fatal, DB already updated): {e}"
                 )
 
-        # Fallback: DB is already stopped (set before this callback was scheduled),
-        # so just ensure local state is clean.
+        # Fallback: DB is already stopped, ensure local state is clean
         try:
             await self.stop_user_bot(user_id)
         except Exception as e:

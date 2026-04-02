@@ -1,16 +1,30 @@
 """
-bot-engine/algorithms/crypto.py
-================================
-Fixed CryptoAlgo v2.
+bot-engine/algorithms/crypto.py — v3
+======================================
+FIX E (Open position deduplication):
+  Previously self._open() was called INSIDE generate_signal() BEFORE the
+  signal was returned. base_algo._process_symbol() then called save_paper_trade()
+  which could return None (duplicate blocked by DB constraint). But _open()
+  had already updated self._open_positions. This caused a phantom entry that
+  would trigger exit logic next cycle with no corresponding DB trade.
 
-Bugs fixed vs v1:
-1. MISSING DB SYNC: Added _db_synced set and _sync_position_from_db() so Render
-   restarts correctly restore open Crypto positions (same pattern as Indian/
-   Commodities/Global algos). Without this, every restart caused a new trade
-   to open every cycle — the "overtrading after restart" bug.
-2. OVERTRADING: mean-rev SELL required 2 consecutive falling RSI candles.
-3. NO EXITS: full TP/SL/RSI/time-based exit logic.
-4. COOLDOWN: won't re-enter within N minutes of the last signal.
+  Fix: self._open() is now called AFTER the DB save succeeds, inside
+  base_algo._process_symbol() via a new _confirm_open() hook. To accomplish
+  this without restructuring every algo, generate_signal() now returns a
+  (signal, price) tuple via a _pending_open staging dict. _confirm_open()
+  is called by _process_symbol() after the DB save succeeds.
+
+  SIMPLER ALTERNATIVE used here: generate_signal() now calls _stage_open()
+  instead of _open(). _stage_open() stores the pending open in
+  self._staged_open[symbol] without touching self._open_positions.
+  _process_symbol() calls self._confirm_staged_open(symbol) only if save
+  succeeds (trade_id is not None). If save returns None, staged open is
+  discarded.
+
+  For exit signals (returning SELL/BUY when _has_position is True),
+  the flow is unchanged — _find_open_trade() reads from DB directly.
+
+All algorithm logic unchanged.
 """
 
 import pandas as pd
@@ -31,12 +45,11 @@ class CryptoAlgo(BaseAlgo):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # {symbol: {"signal": "SELL"|"BUY", "entry_price": float, "opened_at": datetime}}
-        self._open_positions: Dict[str, Dict] = {}
-        # {symbol: datetime} — when we last opened a position on this symbol
-        self._last_signal_time: Dict[str, datetime] = {}
-        # Track which symbols have been synced from DB on this run
-        self._db_synced: set = set()
+        self._open_positions:    Dict[str, Dict] = {}
+        self._last_signal_time:  Dict[str, datetime] = {}
+        self._db_synced:         set = set()
+        # Staging area: holds pending open data until DB confirms the insert
+        self._staged_open:       Dict[str, Dict] = {}
 
     @property
     def market_type(self) -> str:
@@ -59,13 +72,6 @@ class CryptoAlgo(BaseAlgo):
     # ── DB re-sync after restart ──────────────────────────────────────────────
 
     async def _sync_position_from_db(self, symbol: str):
-        """
-        On the first cycle after a restart, check whether there is an open
-        trade in the DB for this symbol. If so, restore it into _open_positions
-        so we don't open a duplicate entry.
-
-        Runs once per symbol per process lifetime (guarded by _db_synced).
-        """
         if symbol in self._db_synced:
             return
         self._db_synced.add(symbol)
@@ -101,14 +107,38 @@ class CryptoAlgo(BaseAlgo):
     def _has_position(self, symbol: str) -> bool:
         return symbol in self._open_positions
 
-    def _open(self, symbol: str, signal: str, price: float):
-        self._open_positions[symbol] = {
+    def _stage_open(self, symbol: str, signal: str, price: float):
+        """
+        FIX E: Stage a pending open. Does NOT touch self._open_positions.
+        base_algo._process_symbol() calls _confirm_staged_open() only
+        if the DB save succeeds (trade_id is not None).
+        """
+        self._staged_open[symbol] = {
             "signal":      signal,
             "entry_price": price,
             "opened_at":   datetime.utcnow(),
         }
         self._last_signal_time[symbol] = datetime.utcnow()
-        logger.info(f"📂 Position opened: {signal} {symbol} @ {price:.4f}")
+        logger.info(f"📋 Open staged (pending DB): {signal} {symbol} @ {price:.4f}")
+
+    def _confirm_staged_open(self, symbol: str):
+        """Called by base_algo after successful DB save."""
+        pending = self._staged_open.pop(symbol, None)
+        if pending:
+            self._open_positions[symbol] = pending
+            logger.info(
+                f"📂 Position confirmed open: {pending['signal']} {symbol} "
+                f"@ {pending['entry_price']:.4f}"
+            )
+
+    def _discard_staged_open(self, symbol: str):
+        """Called by base_algo when DB save returns None (duplicate blocked)."""
+        discarded = self._staged_open.pop(symbol, None)
+        if discarded:
+            logger.warning(
+                f"🚫 Staged open discarded for {symbol} "
+                "(duplicate blocked by DB constraint)"
+            )
 
     def _close(self, symbol: str, reason: str):
         pos = self._open_positions.pop(symbol, None)
@@ -120,7 +150,7 @@ class CryptoAlgo(BaseAlgo):
     # ── Main signal ───────────────────────────────────────────────────────────
 
     async def generate_signal(self, symbol: str) -> Optional[str]:
-        # ── Step 0: Re-sync from DB after restart ─────────────────────────
+        # Re-sync from DB after restart
         await self._sync_position_from_db(symbol)
 
         try:
@@ -130,7 +160,6 @@ class CryptoAlgo(BaseAlgo):
             if len(df) < 35 or len(df_trend) < 210:
                 return None
 
-            # ── Indicators ─────────────────────────────────────────────────
             df_trend["ema200"] = EMAIndicator(df_trend["close"], window=200).ema_indicator()
             trend_up = df_trend["close"].iloc[-1] > df_trend["ema200"].iloc[-1]
 
@@ -156,48 +185,45 @@ class CryptoAlgo(BaseAlgo):
 
             logger.info(
                 f"{symbol} RSI={rsi:.1f} Close={close:.2f} TrendUp={trend_up} "
-                f"BB=[{curr['bb_lower']:.2f}–{curr['bb_upper']:.2f}] "
                 f"Pos={'YES' if self._has_position(symbol) else 'no'} "
                 f"CD={'YES' if self._on_cooldown(symbol) else 'no'}"
             )
 
-            # ── EXIT logic: check open positions first ─────────────────────
             if self._has_position(symbol):
                 return self._check_exit(symbol, curr, prev, rsi, close)
 
-            # ── Don't open if on cooldown ──────────────────────────────────
             if self._on_cooldown(symbol):
                 return None
 
-            # ── ENTRY: Trend-following ─────────────────────────────────────
+            # ── Trend-following entries ─────────────────────────────────────
             if trend_up:
                 if (35 <= rsi <= 52 and
                         close > curr["bb_mid"] and
                         curr["ema9"] > curr["ema21"] and
                         curr["rsi"] > prev["rsi"]):
-                    self._open(symbol, "BUY", close)
+                    self._stage_open(symbol, "BUY", close)  # FIX E: stage, not open
                     return "BUY"
             else:
                 if (48 <= rsi <= 62 and
                         close < curr["bb_mid"] and
                         curr["ema9"] < curr["ema21"] and
                         curr["rsi"] < prev["rsi"]):
-                    self._open(symbol, "SELL", close)
+                    self._stage_open(symbol, "SELL", close)  # FIX E
                     return "SELL"
 
-            # ── ENTRY: Mean-reversion (2-candle RSI confirmation) ──────────
+            # ── Mean-reversion entries ──────────────────────────────────────
             rsi_rising_2 = curr["rsi"] > prev["rsi"] > prev2["rsi"]
             if (close <= curr["bb_lower"] * 1.002 and
                     rsi < 32 and
                     rsi_rising_2):
-                self._open(symbol, "BUY", close)
+                self._stage_open(symbol, "BUY", close)  # FIX E
                 return "BUY"
 
             rsi_falling_2 = curr["rsi"] < prev["rsi"] < prev2["rsi"]
             if (close >= curr["bb_upper"] * 0.998 and
                     rsi > 68 and
                     rsi_falling_2):
-                self._open(symbol, "SELL", close)
+                self._stage_open(symbol, "SELL", close)  # FIX E
                 return "SELL"
 
             return None
@@ -206,16 +232,7 @@ class CryptoAlgo(BaseAlgo):
             logger.error(f"❌ Signal error {symbol}: {e}", exc_info=True)
             return None
 
-    # ── Exit logic ────────────────────────────────────────────────────────────
-
-    def _check_exit(
-        self,
-        symbol: str,
-        curr,
-        prev,
-        rsi: float,
-        close: float,
-    ) -> Optional[str]:
+    def _check_exit(self, symbol: str, curr, prev, rsi: float, close: float) -> Optional[str]:
         pos       = self._open_positions[symbol]
         side      = pos["signal"]
         entry     = pos["entry_price"]
@@ -226,40 +243,24 @@ class CryptoAlgo(BaseAlgo):
 
         if side == "SELL":
             pnl_pct = ((entry - close) / entry) * 100
-
             if pnl_pct >= tp_pct:
-                self._close(symbol, f"TP +{pnl_pct:.2f}%")
-                return "BUY"
-
+                self._close(symbol, f"TP +{pnl_pct:.2f}%"); return "BUY"
             if pnl_pct <= -sl_pct:
-                self._close(symbol, f"SL {pnl_pct:.2f}%")
-                return "BUY"
-
+                self._close(symbol, f"SL {pnl_pct:.2f}%"); return "BUY"
             if rsi < 58 and curr["rsi"] < prev["rsi"]:
-                self._close(symbol, f"RSI retreat to {rsi:.1f}")
-                return "BUY"
-
+                self._close(symbol, f"RSI retreat to {rsi:.1f}"); return "BUY"
             if (datetime.utcnow() - opened_at) > timedelta(hours=2):
-                self._close(symbol, "time limit 2h")
-                return "BUY"
+                self._close(symbol, "time limit 2h"); return "BUY"
 
         elif side == "BUY":
             pnl_pct = ((close - entry) / entry) * 100
-
             if pnl_pct >= tp_pct:
-                self._close(symbol, f"TP +{pnl_pct:.2f}%")
-                return "SELL"
-
+                self._close(symbol, f"TP +{pnl_pct:.2f}%"); return "SELL"
             if pnl_pct <= -sl_pct:
-                self._close(symbol, f"SL {pnl_pct:.2f}%")
-                return "SELL"
-
+                self._close(symbol, f"SL {pnl_pct:.2f}%"); return "SELL"
             if rsi > 62 and curr["rsi"] < prev["rsi"]:
-                self._close(symbol, f"RSI peak at {rsi:.1f}")
-                return "SELL"
-
+                self._close(symbol, f"RSI peak at {rsi:.1f}"); return "SELL"
             if (datetime.utcnow() - opened_at) > timedelta(hours=2):
-                self._close(symbol, "time limit 2h")
-                return "SELL"
+                self._close(symbol, "time limit 2h"); return "SELL"
 
-        return None  # hold
+        return None

@@ -1,19 +1,12 @@
 """
-bot-engine/exchange_connector.py
-=================================
-Production exchange connector.
+bot-engine/exchange_connector.py — v2
+========================================
+PERF S: OHLCV cache now has a maximum size (MAX_CACHE_ENTRIES) and
+        periodic eviction of stale entries. Previously the cache grew
+        unboundedly — with many symbols across restarts this could hold
+        significant memory.
 
-PERFORMANCE IMPROVEMENTS:
-1. OHLCV in-memory cache with 30s TTL — eliminates duplicate exchange
-   fetches when Indian + Crypto algos both request BTC/USDT data.
-2. Shared connector pool (per user+market) reused across cycles — avoids
-   9 open/close aiohttp handshakes per minute for 3-symbol setups.
-3. fetch_ohlcv_cached() helper — drop-in replacement that respects TTL.
-4. For paper trades: reuse the last OHLCV close as exit price instead of
-   calling fetch_ticker() — halves network round-trips per cycle.
-
-KEY EXISTING GUARANTEE (unchanged):
-Every public method still closes the exchange on exit — no leaked sessions.
+All other logic unchanged from v1.
 """
 
 import ccxt.async_support as ccxt
@@ -39,11 +32,10 @@ EXCHANGE_MAP = {
 FUTURES_MARKETS = {"crypto", "commodities", "global"}
 SPOT_MARKETS    = {"indian"}
 
-# ── Module-level OHLCV cache ──────────────────────────────────────────────────
-# Keyed by (exchange_name, symbol, timeframe) → (timestamp, DataFrame)
-# Shared across all instances — safe because we only read DataFrames after fetch.
+# ── OHLCV cache ───────────────────────────────────────────────────────────────
 _ohlcv_cache: Dict[Tuple[str, str, str], Tuple[float, pd.DataFrame]] = {}
-OHLCV_CACHE_TTL = 30   # seconds — shorter than any 1m candle so stale data never used
+OHLCV_CACHE_TTL     = 30   # seconds
+MAX_CACHE_ENTRIES   = 200  # PERF S: cap memory usage
 
 
 def _cache_key(exchange_name: str, symbol: str, timeframe: str) -> Tuple[str, str, str]:
@@ -65,7 +57,25 @@ def _set_cached_ohlcv(
     exchange_name: str, symbol: str, timeframe: str, df: pd.DataFrame
 ) -> None:
     key = _cache_key(exchange_name, symbol, timeframe)
-    _ohlcv_cache[key] = (time.time(), df)
+
+    # PERF S: Evict stale entries before adding new ones
+    # This runs in O(n) but n is bounded by MAX_CACHE_ENTRIES (200)
+    now = time.time()
+    if len(_ohlcv_cache) >= MAX_CACHE_ENTRIES:
+        stale_keys = [
+            k for k, (ts, _) in _ohlcv_cache.items()
+            if now - ts > OHLCV_CACHE_TTL
+        ]
+        for k in stale_keys:
+            del _ohlcv_cache[k]
+
+        # If still over limit after evicting stale entries, remove oldest
+        if len(_ohlcv_cache) >= MAX_CACHE_ENTRIES:
+            oldest_key = min(_ohlcv_cache, key=lambda k: _ohlcv_cache[k][0])
+            del _ohlcv_cache[oldest_key]
+            logger.debug(f"🗑️  OHLCV cache evicted oldest entry (cache full)")
+
+    _ohlcv_cache[key] = (now, df)
 
 
 def clear_ohlcv_cache() -> None:
@@ -75,14 +85,6 @@ def clear_ohlcv_cache() -> None:
 
 
 class ExchangeConnector:
-    """
-    Stateless config holder.  Call methods that need exchange access —
-    each one creates, uses, and closes the ccxt instance internally.
-
-    Use fetch_ohlcv_cached() when multiple algos may request the same
-    symbol+timeframe within the same 30-second window.
-    """
-
     def __init__(
         self,
         exchange_name: str,
@@ -120,11 +122,6 @@ class ExchangeConnector:
 
     @asynccontextmanager
     async def _exchange(self):
-        """
-        Context manager that creates a ccxt exchange, yields it,
-        and ALWAYS closes it — even on exception.
-        This is the only place ccxt instances are created.
-        """
         ExClass  = getattr(ccxt, self._ccxt_id)
         exchange = ExClass({
             "apiKey":          self.api_key,
@@ -141,15 +138,12 @@ class ExchangeConnector:
             except Exception as e:
                 logger.warning(f"⚠️  exchange.close() error (non-fatal): {e}")
 
-    # ── Public API ─────────────────────────────────────────────────────────────
-
     async def fetch_ohlcv(
         self,
         symbol: str,
         timeframe: str = "15m",
         limit: int = 100,
     ) -> pd.DataFrame:
-        """Fetch OHLCV — bypasses cache. Prefer fetch_ohlcv_cached() for algo use."""
         async with self._exchange() as ex:
             try:
                 raw = await ex.fetch_ohlcv(symbol, timeframe, limit=limit)
@@ -172,15 +166,6 @@ class ExchangeConnector:
         timeframe: str = "15m",
         limit: int = 100,
     ) -> pd.DataFrame:
-        """
-        Fetch OHLCV with a 30-second in-process cache.
-
-        DROP-IN replacement for fetch_ohlcv() in algo signal generation.
-        When Indian + Crypto algos both run BTC/USDT on 15m, only the first
-        call hits the exchange; subsequent calls within 30s return cached data.
-
-        Use fetch_ohlcv() directly if you always need fresh data (e.g. exit checks).
-        """
         cached = _get_cached_ohlcv(self.exchange_name, symbol, timeframe)
         if cached is not None:
             return cached
@@ -210,22 +195,12 @@ class ExchangeConnector:
                 raise
 
     async def fetch_latest_close(self, symbol: str, timeframe: str = "1m") -> Optional[float]:
-        """
-        Lightweight exit-price fetch for PAPER trades.
-
-        Instead of fetch_ticker() (a separate REST call), reuses the most
-        recent cached OHLCV close.  Falls back to fetch_ticker() if no
-        cache entry exists (e.g. first cycle after restart).
-
-        For LIVE trades always use fetch_ticker() for precision.
-        """
         cached = _get_cached_ohlcv(self.exchange_name, symbol, timeframe)
         if cached is not None and not cached.empty:
             price = float(cached["close"].iloc[-1])
             logger.debug(f"💲 Using cached close for {symbol}: {price}")
             return price
 
-        # Fall back to ticker
         try:
             ticker = await self.fetch_ticker(symbol)
             return float(ticker.get("last", 0)) or None

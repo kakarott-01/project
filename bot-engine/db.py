@@ -1,12 +1,17 @@
 """
 bot-engine/db.py
 ================
-Production database layer.
+Production database layer — v2.
 
-Bug fixed: close_paper_trade() and close_live_trade() used Python's
-float round() which suffers IEEE-754 drift. Now uses Decimal +
-ROUND_HALF_UP for consistent PnL accuracy — matching what the frontend
-expects and what PostgreSQL stores.
+Fixes applied:
+  FIX C: close_paper_trade / close_live_trade now use WHERE status='open'
+          and check rowcount to prevent double-close.
+  FIX E: save_paper_trade / save_live_trade use INSERT ... ON CONFLICT DO NOTHING
+          (relies on the partial unique index idx_trades_one_open_per_symbol).
+  FIX K: New methods for risk state persistence (daily_loss, open_trade_count).
+  FIX 5: New method for runtime reconciliation — get_open_trade_ids_for_market()
+          and bulk_cancel_orphan_trades().
+  PERF:  get_all_open_trades() returns bot_session_ref for reconciliation filtering.
 """
 
 import os
@@ -16,7 +21,7 @@ import base64
 import hashlib
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, Dict, List, Any
-from datetime import datetime
+from datetime import datetime, date
 
 import asyncpg
 from Crypto.Cipher import AES
@@ -59,10 +64,6 @@ def decrypt_field(ciphertext: str) -> Optional[str]:
 
 
 def _round_pnl(value: float, places: int = 8) -> str:
-    """
-    Round a float PnL value using Decimal ROUND_HALF_UP to avoid IEEE-754
-    drift. Returns a string suitable for PostgreSQL DECIMAL columns.
-    """
     quantizer = Decimal("0." + "0" * places)
     return str(Decimal(str(value)).quantize(quantizer, rounding=ROUND_HALF_UP))
 
@@ -96,11 +97,6 @@ class Database:
     # ── Startup cleanup ───────────────────────────────────────────────────────
 
     async def cleanup_stale_sessions(self) -> int:
-        """
-        Called on startup BEFORE auto-restart.
-        Closes any bot_sessions that were left in 'running' state.
-        Does NOT touch bot_statuses — we need those to know which bots to restart.
-        """
         pool = await self.pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -115,10 +111,6 @@ class Database:
     # ── Auto-restart support ──────────────────────────────────────────────────
 
     async def get_running_user_bots(self) -> Dict[str, List[str]]:
-        """
-        Returns a mapping of user_id → list of markets for all users whose
-        bot_statuses row shows status='running'.
-        """
         pool = await self.pool()
         rows = await pool.fetch(
             """
@@ -228,24 +220,38 @@ class Database:
         market_type: str,
         session_ref: str = "",
     ) -> Optional[str]:
-        """Save an open paper trade. Returns the new trade ID."""
+        """
+        Save an open paper trade. Returns the new trade ID, or None if a
+        duplicate open trade already exists for this user+symbol+market
+        (relies on the partial unique index idx_trades_one_open_per_symbol).
+
+        FIX E: ON CONFLICT DO NOTHING prevents duplicate open trades.
+        """
         pool = await self.pool()
         row = await pool.fetchrow(
             """INSERT INTO trades
                (user_id, exchange_name, market_type, symbol, side, quantity,
                 entry_price, status, algo_used, is_paper, bot_session_ref, opened_at)
                VALUES ($1,'paper',$2,$3,$4,$5,$6,'open',$7,true,$8,$9)
+               ON CONFLICT ON CONSTRAINT idx_trades_one_open_per_symbol DO NOTHING
                RETURNING id""",
             user_id, market_type, symbol,
             side.lower(), str(quantity), str(price),
             algo_name, session_ref or None,
             datetime.utcnow(),
         )
-        logger.info(
-            f"📝 Paper trade opened: {side.upper()} {quantity:.6f} {symbol} @ {price} "
-            f"ref={session_ref}"
-        )
-        return str(row["id"]) if row else None
+        if row:
+            logger.info(
+                f"📝 Paper trade opened: {side.upper()} {quantity:.6f} {symbol} @ {price} "
+                f"ref={session_ref}"
+            )
+            return str(row["id"])
+        else:
+            logger.warning(
+                f"⚠️  Duplicate open trade blocked for {symbol} (user={user_id[:8]}…). "
+                "An open position already exists in DB."
+            )
+            return None
 
     async def save_live_trade(
         self,
@@ -260,15 +266,20 @@ class Database:
         algo_name: str,
         market_type: str,
         session_ref: str = "",
-    ):
-        """Save an open live trade."""
+    ) -> Optional[str]:
+        """
+        Save an open live trade.
+        FIX E: ON CONFLICT DO NOTHING prevents duplicate opens.
+        """
         pool = await self.pool()
-        await pool.execute(
+        row = await pool.fetchrow(
             """INSERT INTO trades
                (user_id, exchange_name, market_type, symbol, side, quantity,
                 entry_price, stop_loss, take_profit, status, algo_used,
                 is_paper, exchange_order_id, bot_session_ref, opened_at)
-               VALUES ($1,'live',$2,$3,$4,$5,$6,$7,$8,'open',$9,false,$10,$11,$12)""",
+               VALUES ($1,'live',$2,$3,$4,$5,$6,$7,$8,'open',$9,false,$10,$11,$12)
+               ON CONFLICT ON CONSTRAINT idx_trades_one_open_per_symbol DO NOTHING
+               RETURNING id""",
             user_id, market_type, symbol,
             side.lower(), str(quantity), str(price),
             str(stop_loss), str(take_profit),
@@ -276,10 +287,17 @@ class Database:
             session_ref or None,
             datetime.utcnow(),
         )
-        logger.info(
-            f"📝 Live trade opened: {side.upper()} {quantity} {symbol} @ {price} "
-            f"ref={session_ref}"
-        )
+        if row:
+            logger.info(
+                f"📝 Live trade opened: {side.upper()} {quantity} {symbol} @ {price} "
+                f"ref={session_ref}"
+            )
+            return str(row["id"])
+        else:
+            logger.warning(
+                f"⚠️  Duplicate live trade blocked for {symbol} (user={user_id[:8]}…)."
+            )
+            return None
 
     # ── Trade: FIND OPEN ──────────────────────────────────────────────────────
 
@@ -289,7 +307,6 @@ class Database:
         symbol: str,
         market_type: str,
     ) -> Optional[Dict[str, Any]]:
-        """Returns the most recent open trade for a user+symbol+market, or None."""
         pool = await self.pool()
         row = await pool.fetchrow(
             """SELECT id, side, quantity, entry_price, opened_at
@@ -307,7 +324,6 @@ class Database:
         user_id: str,
         market_type: str,
     ) -> List[Dict[str, Any]]:
-        """Returns all open trades for a user+market."""
         pool = await self.pool()
         rows = await pool.fetch(
             """SELECT id, symbol, side, quantity, entry_price,
@@ -320,7 +336,6 @@ class Database:
         return [dict(row) for row in rows]
 
     async def get_all_open_trades_all_markets(self, user_id: str) -> List[Dict[str, Any]]:
-        """Returns ALL open trades for a user across all markets. Used by CloseAllEngine."""
         pool = await self.pool()
         rows = await pool.fetch(
             """SELECT id, symbol, side, quantity, entry_price,
@@ -333,13 +348,60 @@ class Database:
         return [dict(row) for row in rows]
 
     async def count_open_trades(self, user_id: str) -> int:
-        """Count open trades for a user (all markets). Used for drain completion check."""
         pool = await self.pool()
         row = await pool.fetchrow(
             "SELECT count(*)::int AS n FROM trades WHERE user_id=$1 AND status='open'",
             user_id,
         )
         return row["n"] if row else 0
+
+    # ── FIX 5: Runtime reconciliation helpers ──────────────────────────────────
+
+    async def get_open_symbols_for_market(
+        self,
+        user_id: str,
+        market_type: str,
+    ) -> Dict[str, str]:
+        """
+        Returns {symbol: trade_id} for all open trades for user+market.
+        Used by runtime reconciliation to compare against exchange positions.
+        """
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT id::text, symbol
+               FROM trades
+               WHERE user_id=$1 AND market_type=$2 AND status='open'""",
+            user_id, market_type,
+        )
+        return {row["symbol"]: str(row["id"]) for row in rows}
+
+    async def get_reconciliation_last_run(
+        self,
+        user_id: str,
+        market_type: str,
+    ) -> Optional[datetime]:
+        """Returns the last time reconciliation ran for user+market."""
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            "SELECT last_run_at FROM reconciliation_log WHERE user_id=$1 AND market_type=$2",
+            user_id, market_type,
+        )
+        return row["last_run_at"] if row else None
+
+    async def update_reconciliation_log(
+        self,
+        user_id: str,
+        market_type: str,
+        trades_fixed: int,
+    ):
+        pool = await self.pool()
+        await pool.execute(
+            """INSERT INTO reconciliation_log (user_id, market_type, last_run_at, trades_fixed)
+               VALUES ($1, $2, NOW(), $3)
+               ON CONFLICT (user_id, market_type)
+               DO UPDATE SET last_run_at=NOW(), trades_fixed=$3""",
+            user_id, market_type, trades_fixed,
+        )
 
     # ── Trade: CLOSE ──────────────────────────────────────────────────────────
 
@@ -349,33 +411,44 @@ class Database:
         exit_price: float,
         pnl: float,
         pnl_pct: float,
-    ):
+    ) -> bool:
         """
-        Mark a paper trade as closed with final exit price and PnL.
+        Mark a paper trade as closed.
 
-        Bug fixed: previously used Python float round() which suffers
-        IEEE-754 drift on repeated additions (e.g. 0.1 + 0.2 ≠ 0.3).
-        Now uses Decimal + ROUND_HALF_UP for exact financial rounding.
+        FIX C: WHERE status='open' guard prevents double-close.
+        Returns True if a row was updated, False if trade was already closed.
         """
         pool = await self.pool()
-        await pool.execute(
+        result = await pool.execute(
             """UPDATE trades
                SET status='closed',
                    exit_price=$2,
                    pnl=$3,
                    pnl_pct=$4,
                    closed_at=$5
-               WHERE id=$1""",
+               WHERE id=$1
+                 AND status='open'""",   # FIX C: atomic guard
             trade_id,
             str(exit_price),
             _round_pnl(pnl),
             _round_pct(pnl_pct),
             datetime.utcnow(),
         )
+        # asyncpg execute() returns "UPDATE N" where N is the number of rows affected
+        rows_affected = int(result.split()[-1])
+
+        if rows_affected == 0:
+            logger.warning(
+                f"⚠️  close_paper_trade: trade {trade_id} was already closed or not found. "
+                "Double-close prevented."
+            )
+            return False
+
         logger.info(
             f"📝 Paper trade closed id={trade_id} "
             f"exit={exit_price} PnL={pnl:+.4f} ({pnl_pct:+.2f}%)"
         )
+        return True
 
     async def close_live_trade(
         self,
@@ -384,30 +457,42 @@ class Database:
         pnl: float,
         pnl_pct: float,
         close_order_id: str = "",
-    ):
+    ) -> bool:
         """
         Mark a live trade as closed.
-        Uses Decimal ROUND_HALF_UP for PnL precision (same fix as close_paper_trade).
+        FIX C: WHERE status='open' prevents double-close.
+        Returns True if updated, False if already closed.
         """
         pool = await self.pool()
-        await pool.execute(
+        result = await pool.execute(
             """UPDATE trades
                SET status='closed',
                    exit_price=$2,
                    pnl=$3,
                    pnl_pct=$4,
                    closed_at=$5
-               WHERE id=$1""",
+               WHERE id=$1
+                 AND status='open'""",   # FIX C
             trade_id,
             str(exit_price),
             _round_pnl(pnl),
             _round_pct(pnl_pct),
             datetime.utcnow(),
         )
+        rows_affected = int(result.split()[-1])
+
+        if rows_affected == 0:
+            logger.warning(
+                f"⚠️  close_live_trade: trade {trade_id} was already closed. "
+                "Double-close prevented."
+            )
+            return False
+
         logger.info(
             f"📝 Live trade closed id={trade_id} exit={exit_price} "
             f"PnL={pnl:+.4f} ({pnl_pct:+.2f}%) order={close_order_id}"
         )
+        return True
 
     # ── Trade: CLOSE TRACKING ─────────────────────────────────────────────────
 
@@ -452,16 +537,85 @@ class Database:
     async def cancel_orphan_trade(self, trade_id: str):
         """
         Mark a trade as 'cancelled' when it's open in DB but gone from exchange.
-        The trade was likely closed by SL/TP on exchange while the bot was offline.
+        FIX C: WHERE status='open' guard ensures idempotency.
         """
         pool = await self.pool()
-        await pool.execute(
+        result = await pool.execute(
             """UPDATE trades
                SET status='cancelled', closed_at=NOW()
                WHERE id=$1 AND status='open'""",
             trade_id,
         )
-        logger.info(f"📝 Orphan trade cancelled: id={trade_id}")
+        rows_affected = int(result.split()[-1])
+        if rows_affected > 0:
+            logger.info(f"📝 Orphan trade cancelled: id={trade_id}")
+        return rows_affected > 0
+
+    # ── FIX K: Risk state persistence ─────────────────────────────────────────
+
+    async def get_risk_state(
+        self,
+        user_id: str,
+        market_type: str,
+    ) -> Dict[str, Any]:
+        """
+        Load today's risk state from DB. Returns defaults if not found.
+        Called on RiskManager init to restore counters after restart.
+        """
+        pool = await self.pool()
+        today = date.today().isoformat()
+        row = await pool.fetchrow(
+            """SELECT daily_loss, open_trade_count
+               FROM risk_state
+               WHERE user_id=$1 AND market_type=$2 AND day_date=$3::date""",
+            user_id, market_type, today,
+        )
+        if row:
+            return {
+                "daily_loss":       float(row["daily_loss"]),
+                "open_trade_count": int(row["open_trade_count"]),
+            }
+        return {"daily_loss": 0.0, "open_trade_count": 0}
+
+    async def update_risk_state(
+        self,
+        user_id: str,
+        market_type: str,
+        daily_loss: float,
+        open_trade_count: int,
+    ):
+        """
+        Persist risk state so restarts don't reset daily loss or open count.
+        Uses UPSERT — safe to call after every trade event.
+        """
+        pool = await self.pool()
+        today = date.today().isoformat()
+        await pool.execute(
+            """INSERT INTO risk_state
+               (user_id, market_type, daily_loss, open_trade_count, day_date, updated_at)
+               VALUES ($1, $2, $3, $4, $5::date, NOW())
+               ON CONFLICT (user_id, market_type, day_date)
+               DO UPDATE SET
+                 daily_loss       = $3,
+                 open_trade_count = $4,
+                 updated_at       = NOW()""",
+            user_id, market_type,
+            _round_pnl(daily_loss),
+            open_trade_count,
+            today,
+        )
+
+    async def reset_daily_risk_state(self, user_id: str, market_type: str):
+        """Reset daily loss counter (called at start of new trading day)."""
+        pool = await self.pool()
+        await pool.execute(
+            """INSERT INTO risk_state
+               (user_id, market_type, daily_loss, open_trade_count, day_date, updated_at)
+               VALUES ($1, $2, 0, 0, CURRENT_DATE, NOW())
+               ON CONFLICT (user_id, market_type, day_date)
+               DO UPDATE SET daily_loss=0, updated_at=NOW()""",
+            user_id, market_type,
+        )
 
     # ── Bot status ────────────────────────────────────────────────────────────
 
@@ -496,7 +650,6 @@ class Database:
         )
 
     async def get_bot_stop_mode(self, user_id: str) -> Optional[str]:
-        """Returns the current stop mode from DB, or None if running normally."""
         pool = await self.pool()
         row = await pool.fetchrow(
             "SELECT stop_mode, status FROM bot_statuses WHERE user_id=$1",
@@ -509,7 +662,6 @@ class Database:
         return None
 
     async def force_set_status(self, user_id: str, status: str):
-        """Fallback: directly set bot status without touching other fields."""
         pool = await self.pool()
         await pool.execute(
             """UPDATE bot_statuses
@@ -520,7 +672,6 @@ class Database:
         )
 
     async def set_bot_error(self, user_id: str, error_msg: str):
-        """Set error_message on bot_statuses (for user-facing alerts in the UI)."""
         pool = await self.pool()
         await pool.execute(
             "UPDATE bot_statuses SET error_message=$2, updated_at=NOW() WHERE user_id=$1",
