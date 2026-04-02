@@ -1,21 +1,17 @@
-// app/api/bot/stop/route.ts
-// =========================
-// Handles two stop modes:
+// app/api/bot/stop/route.ts — v2
+// =================================
+// F7 FIX: If Redis is DOWN, stop is allowed to proceed without a lock.
 //
-//  "close_all"  → Bot engine immediately market-closes every open position,
-//                 confirms fills, retries partials, then stops.
+// Reasoning: stopping is always safe — worst case is a redundant no-op.
+// The _doImmediateStop function has its own DB-level idempotency guard
+// (F6 fix in bot-stop.ts), so concurrent stop calls are handled safely
+// even without the Redis lock. Refusing to stop when Redis is down would
+// leave the bot running with no way to halt it.
 //
-//  "graceful"   → Bot enters 'stopping' state. No new entries. Exit logic
-//                 (SL/TP/strategy) continues each cycle. Auto-stops when
-//                 all positions reach zero.
+// Contrast with START: start without a lock is UNSAFE (could create
+// duplicate sessions), so start refuses when Redis is down.
 //
-// If there are NO open positions, both modes behave as an immediate stop.
-//
-// Idempotency:
-//  - Redis lock prevents concurrent stop operations.
-//  - Already-stopped → 200 with current state (no error).
-//  - Already-stopping + same mode → 200 (no-op).
-//  - Already-stopping + escalate to close_all → accepted, mode updated.
+// All stop mode logic unchanged from v1.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
@@ -39,9 +35,22 @@ export async function POST(req: NextRequest) {
     else if (body?.mode === 'graceful') mode = 'graceful'
   } catch { /* empty body → default graceful */ }
 
-  // ── Redis lock — prevent concurrent stop operations ─────────────────────────
+  // ── F7: Redis lock with down-state handling ─────────────────────────────────
   const lock = await acquireBotLock(session.id, 'stop')
+
   if (!lock.acquired) {
+    if (lock.isRedisDown) {
+      // Redis is down — allow stop to proceed without lock.
+      // _doImmediateStop has its own DB-level idempotency guard.
+      console.warn(`[bot/stop] Redis down for user=${session.id} — proceeding without lock (safe for stop)`)
+      try {
+        return await _handleStop(session.id, mode)
+      } catch (e) {
+        console.error('[bot/stop] Stop failed while Redis down:', e)
+        return NextResponse.json({ error: 'Failed to stop bot. Please try again.' }, { status: 500 })
+      }
+    }
+    // Lock contention — another start/stop in progress
     return NextResponse.json({ error: lock.reason }, { status: 429 })
   }
 
@@ -55,7 +64,6 @@ export async function POST(req: NextRequest) {
 async function _handleStop(userId: string, mode: StopMode): Promise<NextResponse> {
   const now = new Date()
 
-  // ── Load current status ─────────────────────────────────────────────────────
   const current = await db.query.botStatuses.findFirst({
     where: eq(botStatuses.userId, userId),
   })
@@ -78,19 +86,16 @@ async function _handleStop(userId: string, mode: StopMode): Promise<NextResponse
     })
   }
 
-  // ── Count open trades ───────────────────────────────────────────────────────
   const openCount = await _countOpenTrades(userId)
 
-  // ── No open positions → immediate stop regardless of mode ──────────────────
+  // No open positions → immediate stop regardless of mode
   if (openCount === 0) {
     await _doImmediateStop(userId, now)
     return NextResponse.json({ success: true, status: 'stopped', mode, openTrades: 0 })
   }
 
-  // ── close_all mode ──────────────────────────────────────────────────────────
+  // close_all mode
   if (mode === 'close_all') {
-    // Tell bot engine to enter close_all mode
-    // Engine will: market-close all positions, confirm fills, retry, then self-stop
     _notifyBotEngine(userId, 'close_all').catch(() => null)
 
     await db.insert(botStatuses)
@@ -123,7 +128,7 @@ async function _handleStop(userId: string, mode: StopMode): Promise<NextResponse
     })
   }
 
-  // ── graceful mode ───────────────────────────────────────────────────────────
+  // graceful mode
   _notifyBotEngine(userId, 'drain').catch(() => null)
 
   await db.insert(botStatuses)
@@ -134,7 +139,7 @@ async function _handleStop(userId: string, mode: StopMode): Promise<NextResponse
       stopMode:       'graceful',
       stoppingAt:     now,
       updatedAt:      now,
-      stopTimeoutSec: 3600, // graceful can take longer — 1 hour default
+      stopTimeoutSec: 3600,
     })
     .onConflictDoUpdate({
       target: botStatuses.userId,
@@ -155,10 +160,6 @@ async function _handleStop(userId: string, mode: StopMode): Promise<NextResponse
     openTrades: openCount,
   })
 }
-
-// ── Internal stop (called when positions = 0 OR from bot engine callback) ──────
-
-// ── Helpers ────────────────────────────────────────────────────────────────────
 
 async function _countOpenTrades(userId: string): Promise<number> {
   const rows = await db

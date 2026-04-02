@@ -1,12 +1,17 @@
 """
-bot-engine/exchange_connector.py — v2
+bot-engine/exchange_connector.py — v3
 ========================================
-PERF S: OHLCV cache now has a maximum size (MAX_CACHE_ENTRIES) and
-        periodic eviction of stale entries. Previously the cache grew
-        unboundedly — with many symbols across restarts this could hold
-        significant memory.
+Added: fetch_order() method required by F5 (close_all fill confirmation)
+       and F9 (entry fill quantity verification).
 
-All other logic unchanged from v1.
+fetch_order(order_id, symbol) → Dict
+  Returns the full order object from the exchange including:
+    - status: 'open' | 'closed' | 'canceled' | 'rejected' | 'expired' | etc.
+    - filled: quantity actually filled (float)
+    - remaining: quantity still unfilled (float)
+    - amount: original requested quantity (float)
+
+All other logic unchanged from v2.
 """
 
 import ccxt.async_support as ccxt
@@ -34,8 +39,8 @@ SPOT_MARKETS    = {"indian"}
 
 # ── OHLCV cache ───────────────────────────────────────────────────────────────
 _ohlcv_cache: Dict[Tuple[str, str, str], Tuple[float, pd.DataFrame]] = {}
-OHLCV_CACHE_TTL     = 30   # seconds
-MAX_CACHE_ENTRIES   = 200  # PERF S: cap memory usage
+OHLCV_CACHE_TTL   = 30
+MAX_CACHE_ENTRIES = 200
 
 
 def _cache_key(exchange_name: str, symbol: str, timeframe: str) -> Tuple[str, str, str]:
@@ -45,7 +50,7 @@ def _cache_key(exchange_name: str, symbol: str, timeframe: str) -> Tuple[str, st
 def _get_cached_ohlcv(
     exchange_name: str, symbol: str, timeframe: str
 ) -> Optional[pd.DataFrame]:
-    key = _cache_key(exchange_name, symbol, timeframe)
+    key   = _cache_key(exchange_name, symbol, timeframe)
     entry = _ohlcv_cache.get(key)
     if entry and (time.time() - entry[0]) < OHLCV_CACHE_TTL:
         logger.debug(f"🎯 OHLCV cache HIT  {symbol} {timeframe}")
@@ -57,9 +62,6 @@ def _set_cached_ohlcv(
     exchange_name: str, symbol: str, timeframe: str, df: pd.DataFrame
 ) -> None:
     key = _cache_key(exchange_name, symbol, timeframe)
-
-    # PERF S: Evict stale entries before adding new ones
-    # This runs in O(n) but n is bounded by MAX_CACHE_ENTRIES (200)
     now = time.time()
     if len(_ohlcv_cache) >= MAX_CACHE_ENTRIES:
         stale_keys = [
@@ -68,18 +70,14 @@ def _set_cached_ohlcv(
         ]
         for k in stale_keys:
             del _ohlcv_cache[k]
-
-        # If still over limit after evicting stale entries, remove oldest
         if len(_ohlcv_cache) >= MAX_CACHE_ENTRIES:
             oldest_key = min(_ohlcv_cache, key=lambda k: _ohlcv_cache[k][0])
             del _ohlcv_cache[oldest_key]
             logger.debug(f"🗑️  OHLCV cache evicted oldest entry (cache full)")
-
     _ohlcv_cache[key] = (now, df)
 
 
 def clear_ohlcv_cache() -> None:
-    """Call on bot stop to free memory."""
     _ohlcv_cache.clear()
     logger.info("🧹 OHLCV cache cleared")
 
@@ -169,7 +167,6 @@ class ExchangeConnector:
         cached = _get_cached_ohlcv(self.exchange_name, symbol, timeframe)
         if cached is not None:
             return cached
-
         logger.debug(f"⬇️  OHLCV cache MISS {symbol} {timeframe} — fetching")
         df = await self.fetch_ohlcv(symbol, timeframe, limit)
         _set_cached_ohlcv(self.exchange_name, symbol, timeframe, df)
@@ -200,7 +197,6 @@ class ExchangeConnector:
             price = float(cached["close"].iloc[-1])
             logger.debug(f"💲 Using cached close for {symbol}: {price}")
             return price
-
         try:
             ticker = await self.fetch_ticker(symbol)
             return float(ticker.get("last", 0)) or None
@@ -227,6 +223,31 @@ class ExchangeConnector:
                 return order
             except Exception as e:
                 logger.error(f"❌ Order failed {symbol}: {e}", exc_info=True)
+                raise
+
+    async def fetch_order(self, order_id: str, symbol: str) -> Dict:
+        """
+        NEW (required by F5 and F9): Fetch a specific order by ID.
+
+        Returns the full ccxt order object including:
+          - status: 'open' | 'closed' | 'canceled' | 'rejected' | 'expired'
+          - filled: quantity actually filled (float)
+          - remaining: quantity not yet filled (float)
+          - amount: original requested quantity (float)
+          - average: average fill price (float, may be None)
+
+        Raises on exchange API error — callers must handle exceptions.
+        """
+        async with self._exchange() as ex:
+            try:
+                order = await ex.fetch_order(order_id, symbol)
+                logger.debug(
+                    f"📋 fetch_order {order_id}: status={order.get('status')} "
+                    f"filled={order.get('filled')} remaining={order.get('remaining')}"
+                )
+                return order
+            except Exception as e:
+                logger.error(f"❌ fetch_order failed {order_id} {symbol}: {e}", exc_info=True)
                 raise
 
     async def fetch_open_orders(self, symbol: Optional[str] = None) -> List[Dict]:

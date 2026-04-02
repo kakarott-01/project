@@ -1,19 +1,20 @@
 """
-bot-engine/risk_manager.py — v2
+bot-engine/risk_manager.py — v3
 =================================
-FIX K: Risk state (daily_loss, open_trade_count) is now persisted to DB
-        and restored on restart. In-memory state is the source of truth
-        during a session; DB is synced after every trade event.
+F10 FIX: last_loss_time is now persisted to DB and restored on restart.
 
-        This prevents the scenario where a restarted bot thinks it has
-        zero daily loss and trades through its configured daily limit.
+PROBLEM: last_loss_time was in-memory only. A bot crash or Render restart
+reset it to None, allowing trading to resume immediately even if the bot
+had hit its cooldown due to a recent loss. This bypassed a critical risk
+control.
 
-Design:
-  - RiskManager is initialized synchronously (no async __init__)
-  - Call await risk_mgr.load_state(db, user_id, market_type) after creation
-    to restore previous state from DB.
-  - Call await risk_mgr.persist_state(db, user_id, market_type) after any
-    trade event that changes daily_loss or open_trade_count.
+FIX:
+  - load_state() now restores last_loss_time from DB
+  - persist_state() now saves last_loss_time to DB
+  - record_trade_closed() still sets self.last_loss_time = time.time()
+    in memory; persist_state() must be called immediately after to save it
+
+All other logic from v2 unchanged.
 """
 
 import logging
@@ -49,18 +50,20 @@ class RiskManager:
         # In-memory state — synced to DB after every trade event
         self.daily_loss       = 0.0
         self.open_trade_count = 0
-        self.last_loss_time   = None
+        # F10: last_loss_time is now restored from DB on startup
+        self.last_loss_time: Optional[float] = None
 
-        # Track whether we've loaded from DB yet
         self._loaded_from_db = False
 
-    # ── FIX K: DB persistence ──────────────────────────────────────────────────
+    # ── F10: DB persistence ───────────────────────────────────────────────────
 
     async def load_state(self, db, user_id: str, market_type: str):
         """
         Load persisted risk state from DB.
-        Call this once after creating the RiskManager.
-        Safe to call multiple times — only loads once.
+        Call once after creating the RiskManager.
+
+        F10: Now also restores last_loss_time so cooldown enforcement
+        is correct after a bot restart or crash.
         """
         if self._loaded_from_db:
             return
@@ -69,15 +72,30 @@ class RiskManager:
             state = await db.get_risk_state(user_id, market_type)
             self.daily_loss       = state.get("daily_loss", 0.0)
             self.open_trade_count = state.get("open_trade_count", 0)
+            # F10: Restore last_loss_time. None means no loss recorded today.
+            self.last_loss_time   = state.get("last_loss_time", None)
             self._loaded_from_db  = True
+
+            cooldown_remaining = self._cooldown_remaining()
             logger.info(
                 f"📊 Risk state restored for {market_type}: "
                 f"daily_loss={self.daily_loss:.4f} "
-                f"open_trades={self.open_trade_count}"
+                f"open_trades={self.open_trade_count} "
+                f"last_loss_time={'%.0f' % self.last_loss_time if self.last_loss_time else 'None'} "
+                f"cooldown_remaining={cooldown_remaining:.0f}s"
             )
+
+            # Warn if cooldown is still active after restart
+            if cooldown_remaining > 0:
+                logger.warning(
+                    f"⏳ [{market_type}] Cooldown still active after restart: "
+                    f"{cooldown_remaining:.0f}s remaining. "
+                    "No new trades will be entered until cooldown expires."
+                )
+
         except Exception as e:
             logger.error(
-                f"❌ Failed to load risk state from DB: {e}. "
+                f"❌ Failed to load risk state from DB for {market_type}: {e}. "
                 "Starting with zero values — daily loss guard may be inaccurate today."
             )
             self._loaded_from_db = True  # Don't retry on every cycle
@@ -86,18 +104,22 @@ class RiskManager:
         """
         Persist current risk state to DB.
         Call after record_trade_opened() or record_trade_closed().
+
+        F10: Now also persists last_loss_time.
         Non-blocking on failure — logged but not re-raised.
         """
         try:
             await db.update_risk_state(
-                user_id, market_type,
+                user_id,
+                market_type,
                 self.daily_loss,
                 self.open_trade_count,
+                self.last_loss_time,  # F10: persist epoch float or None
             )
         except Exception as e:
             logger.warning(f"⚠️  Failed to persist risk state: {e}")
 
-    # ── Core risk calculations (unchanged) ────────────────────────────────────
+    # ── Core risk calculations ─────────────────────────────────────────────────
 
     def calculate_position_size(self, balance: float, entry_price: float) -> float:
         risk_amount = balance * (self.cfg.max_position_pct / 100)
@@ -114,6 +136,14 @@ class RiskManager:
             else 1 - self.cfg.take_profit_pct / 100
         return round(entry_price * factor, 8)
 
+    def _cooldown_remaining(self) -> float:
+        """Return seconds remaining in cooldown, or 0 if not in cooldown."""
+        if not self.last_loss_time:
+            return 0.0
+        elapsed = time.time() - self.last_loss_time
+        remaining = self.cfg.cooldown_seconds - elapsed
+        return max(0.0, remaining)
+
     def can_trade(self, balance: float) -> tuple[bool, str]:
         # Max open trades
         if self.open_trade_count >= self.cfg.max_open_trades:
@@ -124,12 +154,10 @@ class RiskManager:
         if daily_loss_pct >= self.cfg.max_daily_loss_pct:
             return False, f"Daily loss limit ({self.cfg.max_daily_loss_pct}%) reached"
 
-        # Cooldown after loss
-        if self.last_loss_time:
-            elapsed = time.time() - self.last_loss_time
-            if elapsed < self.cfg.cooldown_seconds:
-                remaining = int(self.cfg.cooldown_seconds - elapsed)
-                return False, f"Cooldown active — {remaining}s remaining"
+        # F10: Cooldown — now uses persisted last_loss_time that survives restarts
+        remaining = self._cooldown_remaining()
+        if remaining > 0:
+            return False, f"Cooldown active — {remaining:.0f}s remaining"
 
         return True, "ok"
 
@@ -138,11 +166,13 @@ class RiskManager:
 
     def record_trade_closed(self, pnl: float):
         self.open_trade_count = max(0, self.open_trade_count - 1)
-        self.daily_loss += min(0, pnl)  # only track losses
+        self.daily_loss += min(0, pnl)  # only accumulate losses
         if pnl < 0:
+            # F10: Set in-memory; caller MUST call persist_state() immediately after
             self.last_loss_time = time.time()
 
     def reset_daily(self):
         """Call at start of each trading day."""
-        self.daily_loss = 0.0
+        self.daily_loss     = 0.0
+        self.last_loss_time = None
         logger.info("Daily loss counter reset")

@@ -1,27 +1,32 @@
 """
-bot-engine/close_all_engine.py
-================================
-Handles the "Close All Positions & Stop" flow.
+bot-engine/close_all_engine.py — v2
+=====================================
+F2 FIX:  On partial close failure, set bot status to 'error' instead of
+         silently calling _notify_complete() (which marked bot as 'stopped').
+         Previously, if ANY position failed to close, the bot showed as
+         "Stopped" while real open positions existed on the exchange with
+         no bot managing them. Now it shows as "Error" with a clear message.
 
-Bug fixed: _confirm_fill() had a broken async context manager call:
-    async with connector._exchange().__aenter__()
-This raises TypeError because _exchange() is an asynccontextmanager,
-not a class with __aenter__/__aexit__ directly callable like that.
-The fix: simply check whether the order_id is still in open orders —
-if it's gone, it filled. We don't need to fetch order details for the
-close-all flow.
+F5 FIX:  _confirm_fill() now fetches the actual order status from the exchange
+         instead of assuming "order not in open_orders = fully filled". An order
+         can disappear from open orders because it was CANCELLED or REJECTED,
+         not just filled. Previously this caused DB to record a full fill and
+         mark the trade closed when the position was actually still open.
 
-Design:
+F11 FIX: Exhausted retries now also set bot to 'error' state (same as F2).
+         Previously the retry loop could exhaust silently and return a
+         partial failure dict, which would still call _notify_complete().
+
+Design notes (unchanged from v1):
   - Fetches all open trades from DB for a user
   - For each: places market close order on exchange
-  - Confirms fill by polling exchange order status
+  - Confirms fill by polling exchange order status (NOW via fetch_order)
   - Detects partial fills — retries remainder
   - Uses exponential backoff with jitter on API failures
   - Logs every attempt to position_close_log
-  - After max retries or timeout → alerts user via DB error message
-  - On complete success → calls Next.js /api/bot/complete-stop
-
-Paper mode: skips all exchange calls, just marks DB records closed.
+  - Paper mode: skips all exchange calls, marks DB records closed
+  - On complete success: calls _notify_complete() → bot status = 'stopped'
+  - On ANY failure: sets bot status = 'error' (does NOT call _notify_complete)
 """
 
 import asyncio
@@ -36,18 +41,16 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ── Retry configuration ────────────────────────────────────────────────────────
 MAX_ATTEMPTS        = 5
 BASE_BACKOFF_SEC    = 2.0
 MAX_BACKOFF_SEC     = 60.0
 BACKOFF_MULTIPLIER  = 2.0
-FILL_CONFIRM_POLL   = 3.0     # seconds between fill-confirmation polls
-FILL_CONFIRM_MAX    = 10      # max polls before giving up on order fill
-OVERALL_TIMEOUT_SEC = 300     # 5 minutes total
+FILL_CONFIRM_POLL   = 3.0
+FILL_CONFIRM_MAX    = 10
+OVERALL_TIMEOUT_SEC = 300
 
 
 def _backoff(attempt: int) -> float:
-    """Exponential backoff with ±25% jitter."""
     base   = BASE_BACKOFF_SEC * (BACKOFF_MULTIPLIER ** (attempt - 1))
     jitter = base * 0.25 * random.uniform(-1, 1)
     return min(base + jitter, MAX_BACKOFF_SEC)
@@ -79,10 +82,15 @@ class CloseAllEngine:
 
         for trade in open_trades:
             if time.time() - self._start_time > OVERALL_TIMEOUT_SEC:
-                msg = f"Close-all timed out after {OVERALL_TIMEOUT_SEC}s. {failed} positions may still be open."
+                msg = (
+                    f"Close-all timed out after {OVERALL_TIMEOUT_SEC}s. "
+                    f"{failed} positions may still be open. "
+                    "Manual exchange action required."
+                )
                 logger.error(f"[CloseAll] {msg}")
-                await self.db.set_bot_error(self.user_id, msg)
                 errors.append(msg)
+                # F2/F11: Don't call _notify_complete on timeout — set error state
+                await self.db.set_bot_error_state(self.user_id, msg)
                 break
 
             result = await self._close_one(trade)
@@ -92,16 +100,22 @@ class CloseAllEngine:
                 failed += 1
                 errors.append(f"{trade['symbol']}: {result['error']}")
 
-        all_success = failed == 0 and not errors
+        all_success = failed == 0 and not any(e for e in errors)
 
         if all_success:
             logger.info(f"[CloseAll] ✅ All {closed} positions closed successfully")
+            # F2: Only call _notify_complete on FULL success
             await self._notify_complete()
         else:
-            msg = f"Close-all partial: {closed} closed, {failed} failed. Manual review needed."
-            logger.error(f"[CloseAll] ⚠️  {msg}")
-            await self.db.set_bot_error(self.user_id, msg)
-            await self._notify_complete()
+            # F2 FIX: Do NOT call _notify_complete. Set bot to 'error' state.
+            # This keeps the bot visible as failed so the user knows to act.
+            error_summary = (
+                f"Close-all incomplete: {closed} closed, {failed} failed. "
+                f"Manual exchange review required. "
+                f"Failures: {'; '.join(errors[:3])}"  # truncate for DB column
+            )
+            logger.error(f"[CloseAll] ⚠️  {error_summary}")
+            await self.db.set_bot_error_state(self.user_id, error_summary)
 
         return {"success": all_success, "closed": closed, "failed": failed, "errors": errors}
 
@@ -188,6 +202,7 @@ class CloseAllEngine:
                 order    = await connector.place_order(symbol, close_side, remaining_qty)
                 order_id = order.get("id")
 
+                # F5 FIX: Pass connector so _confirm_fill can call fetch_order
                 filled_qty, status_str, error = await self._confirm_fill(
                     connector, symbol, order_id, remaining_qty
                 )
@@ -239,7 +254,16 @@ class CloseAllEngine:
                     remaining_qty -= filled_qty
                     await asyncio.sleep(_backoff(attempt))
 
+                elif status_str == "cancelled" or status_str == "rejected":
+                    # F5 FIX: Order was explicitly cancelled/rejected by exchange
+                    # Do NOT decrement remaining_qty. Retry with full remaining qty.
+                    logger.warning(
+                        f"[CloseAll] ⚠️  {symbol} order {status_str} by exchange. Retrying."
+                    )
+                    await asyncio.sleep(_backoff(attempt))
+
                 else:
+                    # failed / unconfirmed
                     await asyncio.sleep(_backoff(attempt))
 
             except Exception as e:
@@ -263,10 +287,14 @@ class CloseAllEngine:
                     logger.info(f"[CloseAll] Retrying {symbol} in {backoff:.1f}s…")
                     await asyncio.sleep(backoff)
 
+        # F11 FIX: Retries exhausted — record error and return failure.
+        # The caller's run() loop will accumulate failures and call
+        # set_bot_error_state() — NOT _notify_complete(). This keeps
+        # the bot visible as errored so the user must manually review.
         if remaining_qty > 0:
             err = (
                 f"Failed to fully close {symbol} after {MAX_ATTEMPTS} attempts. "
-                f"Remaining: {remaining_qty:.8f}. Manual action required."
+                f"Remaining qty: {remaining_qty:.8f}. Manual exchange action required."
             )
             await self.db.update_close_error(trade_id, err)
             logger.error(f"[CloseAll] ❌ {err}")
@@ -282,21 +310,23 @@ class CloseAllEngine:
         expected_qty: float,
     ) -> tuple:
         """
-        Poll exchange for order fill confirmation.
-        Returns (filled_qty, status_str, error_msg)
-        status_str: 'filled' | 'partial' | 'failed'
+        F5 FIX: Poll exchange for actual order fill status.
 
-        Bug fixed: the original code tried to use the async context manager
-        incorrectly:
-            async with connector._exchange().__aenter__()
-        This raises TypeError. _exchange() is an asynccontextmanager — you
-        must use it as `async with connector._exchange() as ex:`.
+        Previous bug: if order disappeared from open_orders, we assumed it
+        was fully filled at expected_qty. This was wrong — orders can
+        disappear because they were CANCELLED, REJECTED, or EXPIRED.
 
-        For fill confirmation we only need to check whether the order is
-        still in the open orders list. If it's gone, it filled. We don't
-        need to call any other exchange method, so we just call
-        connector.fetch_open_orders() which handles its own context manager
-        correctly.
+        Fix: When order is no longer in open_orders, call fetch_order() to
+        get the actual status and filled quantity. Only return 'filled' if
+        the exchange confirms status is 'closed'/'filled'. Return 'cancelled'
+        or 'rejected' for those specific terminal states. Return 'partial'
+        if partially filled.
+
+        Falls back to expected_qty assumption ONLY if fetch_order fails
+        (exchange API error during confirmation), with a warning log.
+
+        Returns: (filled_qty, status_str, error_msg)
+        status_str: 'filled' | 'partial' | 'cancelled' | 'rejected' | 'failed'
         """
         if not order_id:
             return 0.0, "failed", "No order ID returned"
@@ -307,23 +337,64 @@ class CloseAllEngine:
                 orders   = await connector.fetch_open_orders(symbol)
                 open_ids = {str(o.get("id")) for o in orders}
 
-                if str(order_id) not in open_ids:
-                    # Order is no longer open — treat as fully filled.
-                    # We don't have exact fill qty here; use expected_qty.
-                    # For partial fills, the exchange would typically leave
-                    # a new reduced order in open_orders rather than removing it.
-                    logger.info(f"[CloseAll] Order {order_id} no longer in open orders — filled")
-                    return expected_qty, "filled", None
+                if str(order_id) in open_ids:
+                    # Still open, keep polling
+                    logger.debug(
+                        f"[CloseAll] Order {order_id} still open (poll {poll+1}/{FILL_CONFIRM_MAX})"
+                    )
+                    continue
 
-                logger.debug(
-                    f"[CloseAll] Order {order_id} still open (poll {poll+1}/{FILL_CONFIRM_MAX})"
-                )
+                # Order is no longer in open orders.
+                # F5 FIX: fetch actual status instead of assuming filled.
+                try:
+                    order_info  = await connector.fetch_order(order_id, symbol)
+                    exch_status = str(order_info.get("status", "unknown")).lower()
+                    filled_qty  = float(order_info.get("filled", 0) or 0)
 
-            except Exception as e:
-                logger.warning(f"[CloseAll] Fill confirmation poll failed: {e}")
+                    if exch_status in ("closed", "filled"):
+                        logger.info(
+                            f"[CloseAll] Order {order_id} confirmed filled: "
+                            f"qty={filled_qty:.8f}"
+                        )
+                        return filled_qty, "filled", None
+
+                    elif exch_status in ("canceled", "cancelled"):
+                        logger.warning(
+                            f"[CloseAll] Order {order_id} was CANCELLED by exchange. "
+                            f"filled_qty={filled_qty:.8f}"
+                        )
+                        if filled_qty > 0:
+                            # Partial fill before cancel
+                            return filled_qty, "partial", f"Order cancelled after partial fill: {filled_qty:.8f}"
+                        return 0.0, "cancelled", "Order cancelled by exchange — will retry"
+
+                    elif exch_status in ("rejected", "expired"):
+                        logger.warning(f"[CloseAll] Order {order_id} was {exch_status} by exchange.")
+                        return 0.0, "rejected", f"Order {exch_status} by exchange — will retry"
+
+                    else:
+                        # Unknown status — be conservative, treat as partial to retry
+                        logger.warning(
+                            f"[CloseAll] Order {order_id} has unknown status '{exch_status}' "
+                            f"after leaving open_orders. Treating as partial to trigger retry."
+                        )
+                        return filled_qty, "partial", f"Unknown order status: {exch_status}"
+
+                except Exception as fetch_err:
+                    # fetch_order failed — we can't confirm fill status.
+                    # WARNING: We fall back to assuming filled to unblock close_all.
+                    # This is the lesser evil vs leaving the loop stuck indefinitely.
+                    logger.warning(
+                        f"[CloseAll] fetch_order failed for {order_id}: {fetch_err}. "
+                        f"Assuming filled={expected_qty:.8f} (fallback — verify manually)."
+                    )
+                    return expected_qty, "filled", f"fill assumed (fetch_order failed: {fetch_err})"
+
+            except Exception as poll_err:
+                logger.warning(f"[CloseAll] Fill confirmation poll failed: {poll_err}")
                 continue
 
-        # Max polls exceeded — treat as partial to trigger a retry
+        # Max polls exceeded — treat as partial to trigger retry
         logger.warning(
             f"[CloseAll] Order {order_id} fill unconfirmed after "
             f"{FILL_CONFIRM_MAX} polls — treating as partial"
@@ -331,10 +402,21 @@ class CloseAllEngine:
         return 0.0, "partial", "Fill unconfirmed after max polls"
 
     async def _notify_complete(self):
-        """Notify Next.js app that close-all is done so DB status → stopped."""
+        """
+        F2 FIX: Only called on FULL success (all positions closed).
+        On partial failure or timeout, set_bot_error_state() is called instead.
+
+        Notifies Next.js to mark bot as stopped and clean up sessions.
+        """
         app_url = os.getenv("NEXT_PUBLIC_APP_URL", "")
         if not app_url:
             logger.warning("[CloseAll] NEXT_PUBLIC_APP_URL not set — skipping completion callback")
+            # Fallback: set status directly in DB
+            try:
+                await self.db.force_set_status(self.user_id, "stopped")
+                logger.info("[CloseAll] Fallback: DB status set to stopped directly")
+            except Exception as e:
+                logger.error(f"[CloseAll] Fallback DB stop also failed: {e}")
             return
 
         try:
@@ -348,8 +430,10 @@ class CloseAllEngine:
                     logger.info(f"[CloseAll] ✅ Completion callback succeeded")
                 else:
                     logger.warning(
-                        f"[CloseAll] Completion callback returned {resp.status_code}"
+                        f"[CloseAll] Completion callback returned {resp.status_code}. "
+                        "Falling back to direct DB update."
                     )
+                    await self.db.force_set_status(self.user_id, "stopped")
         except Exception as e:
             logger.error(f"[CloseAll] Completion callback failed: {e}")
             try:

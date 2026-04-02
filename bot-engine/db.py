@@ -1,20 +1,18 @@
 """
-bot-engine/db.py  — v3
+bot-engine/db.py  — v4
 ========================
-Fixes applied:
+F10 FIX: get_risk_state() now returns last_loss_time from DB.
+         update_risk_state() now persists last_loss_time to DB.
+         This means risk manager cooldown (last_loss_time) survives
+         bot restarts and Render process crashes.
 
-FIX ENCRYPT: decrypt_field() now supports both v2 (AES-256-GCM + scrypt) format
-             and the legacy CryptoJS/MD5 format so existing DB records still work.
-             New records written by the Next.js layer will use v2 prefix.
+F9 FIX:  save_live_trade() now accepts actual_quantity parameter so
+         _execute_live_trade() can store the real filled quantity
+         from the exchange order response, not the requested quantity.
+         Falls back to requested quantity if actual_quantity not provided
+         (paper mode, or exchange didn't return fill info).
 
-FIX WATCHDOG: get/set/reset watchdog_restart_count persisted to bot_statuses
-              so Render process restarts don't reset the counter to zero.
-
-FIX ORPHAN: save_failed_live_order() persists untracked live orders for
-            manual review. Called from base_algo when DB save returns None
-            after a live order was already placed on the exchange.
-
-All other methods from v2 unchanged.
+All other methods from v3 unchanged.
 """
 
 import os
@@ -22,7 +20,6 @@ import json
 import logging
 import base64
 import hashlib
-import struct
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, Dict, List, Any
 from datetime import datetime, date
@@ -35,15 +32,9 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-# ── Key derivation (matches Node.js crypto.scryptSync defaults) ───────────────
+# ── Key derivation ────────────────────────────────────────────────────────────
 
 def _derive_key_v2() -> bytes:
-    """
-    Derive 32-byte key from ENCRYPTION_KEY using scrypt.
-    Parameters MUST match the Node.js side:
-      crypto.scryptSync(password, 'upbot-salt-v2', 32)
-      defaults: N=16384, r=8, p=1
-    """
     password = os.getenv("ENCRYPTION_KEY")
     if not password:
         raise RuntimeError("ENCRYPTION_KEY not set")
@@ -58,7 +49,6 @@ def _derive_key_v2() -> bytes:
 
 
 def _evp_bytes_to_key(password: bytes, salt: bytes, key_len: int = 32, iv_len: int = 16):
-    """CryptoJS-compatible key derivation (MD5-based EVP_BytesToKey)."""
     d, result = b"", b""
     while len(result) < key_len + iv_len:
         d = hashlib.md5(d + password + salt).digest()
@@ -66,13 +56,7 @@ def _evp_bytes_to_key(password: bytes, salt: bytes, key_len: int = 32, iv_len: i
     return result[:key_len], result[key_len:key_len + iv_len]
 
 
-# ── Decryption (supports both formats) ────────────────────────────────────────
-
 def decrypt_field(ciphertext: str) -> Optional[str]:
-    """
-    Decrypt a field from the DB.
-    Supports v2 (AES-256-GCM, prefix 'v2:') and legacy CryptoJS format.
-    """
     if not ciphertext:
         return None
     if ciphertext.startswith("v2:"):
@@ -81,19 +65,14 @@ def decrypt_field(ciphertext: str) -> Optional[str]:
 
 
 def _decrypt_v2(b64: str) -> Optional[str]:
-    """Decrypt AES-256-GCM ciphertext produced by Node.js crypto."""
     try:
         key    = _derive_key_v2()
         packed = base64.b64decode(b64)
-
-        # Layout: iv[12] ‖ tag[16] ‖ ciphertext
         if len(packed) < 12 + 16 + 1:
             raise ValueError("v2 ciphertext too short")
-
         iv         = packed[:12]
         tag        = packed[12:28]
         ciphertext = packed[28:]
-
         cipher    = AES.new(key, AES.MODE_GCM, nonce=iv)
         plaintext = cipher.decrypt_and_verify(ciphertext, tag)
         return plaintext.decode("utf-8")
@@ -103,7 +82,6 @@ def _decrypt_v2(b64: str) -> Optional[str]:
 
 
 def _decrypt_legacy(ciphertext: str) -> Optional[str]:
-    """CryptoJS-compatible AES-CBC decryption (legacy format)."""
     try:
         password = os.getenv("ENCRYPTION_KEY")
         if not password:
@@ -239,13 +217,9 @@ class Database:
         row  = await pool.fetchrow("SELECT * FROM risk_settings WHERE user_id=$1", user_id)
         return dict(row) if row else {}
 
-    # ── FIX WATCHDOG: Persist restart counter across process restarts ─────────
+    # ── Watchdog restart counter ──────────────────────────────────────────────
 
     async def get_watchdog_restart_count(self, user_id: str) -> int:
-        """
-        FIX: Read watchdog restart counter from DB so Render process restarts
-        don't reset it to zero, preventing infinite restart loops on broken configs.
-        """
         pool = await self.pool()
         row  = await pool.fetchrow(
             "SELECT watchdog_restart_count FROM bot_statuses WHERE user_id=$1",
@@ -266,14 +240,13 @@ class Database:
         )
 
     async def reset_watchdog_restart_count(self, user_id: str):
-        """Reset after a healthy heartbeat is observed."""
         pool = await self.pool()
         await pool.execute(
             "UPDATE bot_statuses SET watchdog_restart_count=0, updated_at=NOW() WHERE user_id=$1",
             user_id,
         )
 
-    # ── FIX ORPHAN: Persist failed live orders for manual review ──────────────
+    # ── Failed live orders ────────────────────────────────────────────────────
 
     async def save_failed_live_order(
         self,
@@ -290,11 +263,6 @@ class Database:
         cancel_succeeded: bool = False,
         cancel_error: Optional[str] = None,
     ):
-        """
-        FIX: Record a live order that was placed on the exchange but failed
-        to save to the trades table. These require manual review — real money
-        is committed but the system has no tracking record.
-        """
         pool = await self.pool()
         try:
             await pool.execute(
@@ -314,7 +282,6 @@ class Database:
                 f"order_id={exchange_order_id} reason={fail_reason}"
             )
         except Exception as e:
-            # Last resort: at least log it loudly
             logger.critical(
                 f"💀 CRITICAL: Could not save failed order record to DB! "
                 f"symbol={symbol} order_id={exchange_order_id} err={e}. "
@@ -388,7 +355,18 @@ class Database:
         algo_name: str,
         market_type: str,
         session_ref: str = "",
+        # F9: actual quantity filled by the exchange (may differ from requested)
+        actual_quantity: Optional[float] = None,
     ) -> Optional[str]:
+        # F9: Use actual filled quantity if provided, fall back to requested quantity
+        recorded_quantity = actual_quantity if actual_quantity is not None else quantity
+
+        if actual_quantity is not None and abs(actual_quantity - quantity) > 0.0001:
+            logger.warning(
+                f"⚠️  Partial fill detected for {symbol}: "
+                f"requested={quantity:.8f} filled={actual_quantity:.8f}"
+            )
+
         pool = await self.pool()
         row = await pool.fetchrow(
             """INSERT INTO trades
@@ -399,14 +377,14 @@ class Database:
                ON CONFLICT ON CONSTRAINT idx_trades_one_open_per_symbol DO NOTHING
                RETURNING id""",
             user_id, market_type, symbol,
-            side.lower(), str(quantity), str(price),
+            side.lower(), str(recorded_quantity), str(price),
             str(stop_loss), str(take_profit),
             algo_name, order_id,
             session_ref or None,
             datetime.utcnow(),
         )
         if row:
-            logger.info(f"📝 Live trade opened: {side.upper()} {quantity} {symbol} @ {price}")
+            logger.info(f"📝 Live trade opened: {side.upper()} {recorded_quantity} {symbol} @ {price}")
             return str(row["id"])
         else:
             logger.warning(f"⚠️  Duplicate live trade blocked for {symbol} (user={user_id[:8]}…)")
@@ -551,38 +529,72 @@ class Database:
             logger.info(f"📝 Orphan trade cancelled: id={trade_id}")
         return rows_affected > 0
 
-    # ── Risk state ────────────────────────────────────────────────────────────
+    # ── Risk state (F10: now includes last_loss_time) ─────────────────────────
 
     async def get_risk_state(self, user_id: str, market_type: str) -> Dict[str, Any]:
+        """
+        F10 FIX: Now returns last_loss_time so risk manager cooldowns survive
+        bot restarts. last_loss_time is stored as a float (UTC epoch seconds),
+        matching Python's time.time() output. NULL in DB → None here → risk
+        manager treats it as "no recent loss".
+        """
         pool  = await self.pool()
         today = date.today().isoformat()
         row   = await pool.fetchrow(
-            """SELECT daily_loss, open_trade_count FROM risk_state
+            """SELECT daily_loss, open_trade_count, last_loss_time
+               FROM risk_state
                WHERE user_id=$1 AND market_type=$2 AND day_date=$3::date""",
             user_id, market_type, today,
         )
         if row:
-            return {"daily_loss": float(row["daily_loss"]), "open_trade_count": int(row["open_trade_count"])}
-        return {"daily_loss": 0.0, "open_trade_count": 0}
+            return {
+                "daily_loss":      float(row["daily_loss"]),
+                "open_trade_count": int(row["open_trade_count"]),
+                # F10: None if never set, or epoch seconds float if set
+                "last_loss_time":  float(row["last_loss_time"]) if row["last_loss_time"] is not None else None,
+            }
+        return {"daily_loss": 0.0, "open_trade_count": 0, "last_loss_time": None}
 
-    async def update_risk_state(self, user_id: str, market_type: str, daily_loss: float, open_trade_count: int):
+    async def update_risk_state(
+        self,
+        user_id: str,
+        market_type: str,
+        daily_loss: float,
+        open_trade_count: int,
+        last_loss_time: Optional[float] = None,  # F10: new param
+    ):
+        """
+        F10 FIX: Persists last_loss_time alongside daily_loss and open_trade_count.
+        last_loss_time is the UTC epoch float from time.time() at the moment of
+        the last loss, or None if no loss has occurred today.
+        """
         pool  = await self.pool()
         today = date.today().isoformat()
         await pool.execute(
             """INSERT INTO risk_state
-               (user_id, market_type, daily_loss, open_trade_count, day_date, updated_at)
-               VALUES ($1, $2, $3, $4, $5::date, NOW())
+               (user_id, market_type, daily_loss, open_trade_count, last_loss_time, day_date, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6::date, NOW())
                ON CONFLICT (user_id, market_type, day_date)
-               DO UPDATE SET daily_loss=$3, open_trade_count=$4, updated_at=NOW()""",
-            user_id, market_type, _round_pnl(daily_loss), open_trade_count, today,
+               DO UPDATE SET
+                 daily_loss=$3,
+                 open_trade_count=$4,
+                 last_loss_time=$5,
+                 updated_at=NOW()""",
+            user_id, market_type,
+            _round_pnl(daily_loss),
+            open_trade_count,
+            last_loss_time,  # F10: can be None (NULL in DB)
+            today,
         )
 
     async def reset_daily_risk_state(self, user_id: str, market_type: str):
         pool = await self.pool()
         await pool.execute(
-            """INSERT INTO risk_state (user_id, market_type, daily_loss, open_trade_count, day_date, updated_at)
-               VALUES ($1, $2, 0, 0, CURRENT_DATE, NOW())
-               ON CONFLICT (user_id, market_type, day_date) DO UPDATE SET daily_loss=0, updated_at=NOW()""",
+            """INSERT INTO risk_state
+               (user_id, market_type, daily_loss, open_trade_count, last_loss_time, day_date, updated_at)
+               VALUES ($1, $2, 0, 0, NULL, CURRENT_DATE, NOW())
+               ON CONFLICT (user_id, market_type, day_date)
+               DO UPDATE SET daily_loss=0, open_trade_count=0, last_loss_time=NULL, updated_at=NOW()""",
             user_id, market_type,
         )
 
@@ -636,3 +648,19 @@ class Database:
             "UPDATE bot_statuses SET error_message=$2, updated_at=NOW() WHERE user_id=$1",
             user_id, error_msg,
         )
+
+    async def set_bot_error_state(self, user_id: str, error_msg: str):
+        """
+        F2/F11: Sets bot status to 'error' (not 'stopped') with a clear message.
+        Used by close_all_engine when positions fail to close — bot should appear
+        as failed/errored, not silently stopped, so user knows manual action needed.
+        """
+        pool = await self.pool()
+        await pool.execute(
+            """UPDATE bot_statuses
+               SET status='error', error_message=$2, updated_at=NOW(),
+                   stop_mode=NULL, stopping_at=NULL
+               WHERE user_id=$1""",
+            user_id, error_msg,
+        )
+        logger.error(f"🚨 Bot set to error state for user={user_id[:8]}…: {error_msg}")

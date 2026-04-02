@@ -1,7 +1,7 @@
 import {
   pgTable, text, timestamp, boolean, integer,
   decimal, jsonb, uuid, varchar, index, pgEnum,
-  date, primaryKey
+  date, primaryKey, doublePrecision
 } from 'drizzle-orm/pg-core'
 import { relations } from 'drizzle-orm'
 
@@ -34,7 +34,7 @@ export const users = pgTable('users', {
 export const accessCodes = pgTable('access_codes', {
   id:          uuid('id').defaultRandom().primaryKey(),
   code:        varchar('code', { length: 64 }).notNull().unique(),
-  codeSha256:  varchar('code_sha256', { length: 64 }),   // FIX: fast O(1) lookup
+  codeSha256:  varchar('code_sha256', { length: 64 }),
   label:       varchar('label', { length: 100 }),
   createdBy:   varchar('created_by', { length: 255 }).notNull(),
   expiresAt:   timestamp('expires_at').notNull(),
@@ -110,7 +110,6 @@ export const botStatuses = pgTable('bot_statuses', {
   stopMode:             varchar('stop_mode', { length: 20 }),
   stoppingAt:           timestamp('stopping_at'),
   stopTimeoutSec:       integer('stop_timeout_sec').default(300),
-  // FIX: Persist watchdog restart counter so Render process restarts don't reset it
   watchdogRestartCount: integer('watchdog_restart_count').default(0).notNull(),
 })
 
@@ -184,6 +183,10 @@ export const trades = pgTable('trades', {
   openedIdx:    index('trades_opened_idx').on(t.openedAt),
   sessionIdx:   index('trades_session_idx').on(t.sessionId),
   userOpenIdx:  index('idx_trades_user_open').on(t.userId, t.status),
+  // NOTE: The unique partial index idx_trades_one_open_per_symbol is created
+  // via raw SQL in migration 001_production_fixes.sql because Drizzle does not
+  // support partial unique indexes declaratively. It exists in the DB and is
+  // referenced by ON CONFLICT in Python db.py.
 }))
 
 // ─── Position Close Log ───────────────────────────────────────────────────────
@@ -204,12 +207,6 @@ export const positionCloseLog = pgTable('position_close_log', {
   userIdx:  index('idx_close_log_user').on(t.userId, t.attemptedAt),
 }))
 
-/**
- * FIX: New table to record live orders that were placed on the exchange but
- *      failed to save to the trades table (duplicate block, DB error, etc.).
- *      These require manual review — they represent real money committed to
- *      positions the system has no record of.
- */
 export const failedLiveOrders = pgTable('failed_live_orders', {
   id:              uuid('id').defaultRandom().primaryKey(),
   userId:          uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
@@ -220,7 +217,7 @@ export const failedLiveOrders = pgTable('failed_live_orders', {
   quantity:        decimal('quantity',   { precision: 20, scale: 8 }).notNull(),
   entryPrice:      decimal('entry_price',{ precision: 20, scale: 8 }).notNull(),
   exchangeOrderId: varchar('exchange_order_id', { length: 255 }),
-  failReason:      text('fail_reason').notNull(),   // 'duplicate_blocked' | 'db_error' | 'cancel_failed'
+  failReason:      text('fail_reason').notNull(),
   cancelAttempted: boolean('cancel_attempted').default(false).notNull(),
   cancelSucceeded: boolean('cancel_succeeded').default(false).notNull(),
   cancelError:     text('cancel_error'),
@@ -265,7 +262,10 @@ export const modeAuditLogs = pgTable('mode_audit_logs', {
   createdIdx: index('audit_created_idx').on(t.createdAt),
 }))
 
-// ─── Risk State (persisted per-market daily risk counters for bot restart) ────
+// ─── Risk State ───────────────────────────────────────────────────────────────
+// F10: Added last_loss_time (double precision = UTC epoch seconds float).
+// Persists risk_manager.last_loss_time across bot restarts so cooldowns
+// are correctly enforced even after a crash or Render restart.
 export const riskState = pgTable('risk_state', {
   userId:         uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
   marketType:     varchar('market_type', { length: 50 }).notNull(),
@@ -273,11 +273,13 @@ export const riskState = pgTable('risk_state', {
   openTradeCount: integer('open_trade_count').notNull().default(0),
   dayDate:        date('day_date').notNull().defaultNow(),
   updatedAt:      timestamp('updated_at').notNull().defaultNow(),
+  // F10: new column — persists last_loss_time for cooldown enforcement on restart
+  lastLossTime:   doublePrecision('last_loss_time'),
 }, (t) => ({
   pk: primaryKey({ columns: [t.userId, t.marketType, t.dayDate] }),
 }))
 
-// ─── Reconciliation Log (throttles runtime position reconciliation) ───────────
+// ─── Reconciliation Log ───────────────────────────────────────────────────────
 export const reconciliationLog = pgTable('reconciliation_log', {
   userId:      uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
   marketType:  varchar('market_type', { length: 50 }).notNull(),

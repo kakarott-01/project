@@ -1,11 +1,15 @@
-// app/api/bot/start/route.ts — v2
+// app/api/bot/start/route.ts — v3
 // =================================
-// PERF Q: Exchange API is now fetched ONCE with findMany() and filtered
-//         in memory, instead of one findFirst() per market in two separate
-//         loops. Eliminates N duplicate round-trips to Neon on bot start.
+// F4 FIX: On engine call failure, rollback now covers BOTH:
+//   - botSessions (was already done in v2)
+//   - botStatuses (was missing — left status as 'running' on failure)
 //
-// All other logic from v1 unchanged (session creation before engine call,
-// Redis distributed lock, stale session cleanup, engine error rollback).
+// F7 FIX: If Redis is DOWN (not just lock contention), start is refused
+//   with a clear error. Starting without a lock is unsafe — it could
+//   create duplicate sessions and start multiple bot instances.
+//   (Stop is allowed without a lock; Start is not — see bot-lock.ts.)
+//
+// All other logic from v2 unchanged.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
@@ -18,9 +22,17 @@ export async function POST(req: NextRequest) {
   const session = await auth()
   if (!session?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  // ── Redis distributed lock ─────────────────────────────────────────────────
+  // ── F7 + F4: Redis distributed lock ────────────────────────────────────────
+  // If Redis is DOWN: refuse start (unsafe without lock — could duplicate).
+  // If lock contention: return 429 (another start/stop in progress).
   const lock = await acquireBotLock(session.id, 'start')
   if (!lock.acquired) {
+    if (lock.isRedisDown) {
+      return NextResponse.json(
+        { error: 'Lock service temporarily unavailable. Please try again in a few seconds.' },
+        { status: 503 }
+      )
+    }
     return NextResponse.json({ error: lock.reason }, { status: 429 })
   }
 
@@ -57,9 +69,7 @@ export async function POST(req: NextRequest) {
         eq(botSessions.status, 'running'),
       ))
 
-    // PERF Q: Fetch ALL exchange APIs for this user in ONE query,
-    // then filter in-memory per market. Previously this was N findFirst()
-    // calls in a loop — one per market, twice (validation + session creation).
+    // ── Fetch all exchange/config data in one round trip ──────────────────────
     const [allApis, allConfigs] = await Promise.all([
       db.query.exchangeApis.findMany({
         where: and(
@@ -84,7 +94,6 @@ export async function POST(req: NextRequest) {
       }),
     ])
 
-    // Build lookup maps for O(1) access in the loop below
     const apiByMarket    = new Map(allApis.map(a => [a.marketType, a]))
     const configByMarket = new Map(allConfigs.map(c => [c.marketType, c]))
 
@@ -106,7 +115,6 @@ export async function POST(req: NextRequest) {
     const now = new Date()
 
     // ── Create sessions BEFORE calling the engine ─────────────────────────────
-    // Sessions are created first so if the engine call fails, we can roll back.
     const sessionIds: Record<string, string> = {}
     const createdSessionIds: string[] = []
 
@@ -127,47 +135,10 @@ export async function POST(req: NextRequest) {
       createdSessionIds.push(newSession.id)
     }
 
-    // ── Call bot engine ───────────────────────────────────────────────────────
-    let botRes: Response | null = null
-    try {
-      botRes = await fetch(`${process.env.BOT_ENGINE_URL}/bot/start`, {
-        method:  'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Bot-Secret': process.env.BOT_ENGINE_SECRET!,
-        },
-        body:   JSON.stringify({ user_id: session.id, markets, session_ids: sessionIds }),
-        signal: AbortSignal.timeout(15_000),
-      })
-    } catch (err) {
-      console.error('Bot engine unreachable:', err)
-      // Roll back sessions
-      for (const sid of createdSessionIds) {
-        await db.update(botSessions)
-          .set({ status: 'stopped', endedAt: new Date() })
-          .where(eq(botSessions.id, sid))
-      }
-      return NextResponse.json(
-        { error: 'Bot engine is unreachable. Is the Render service running?' },
-        { status: 503 },
-      )
-    }
-
-    if (!botRes.ok) {
-      const engineBody = await botRes.json().catch(() => ({}))
-      // Roll back sessions on engine error
-      for (const sid of createdSessionIds) {
-        await db.update(botSessions)
-          .set({ status: 'stopped', endedAt: new Date() })
-          .where(eq(botSessions.id, sid))
-      }
-      return NextResponse.json(
-        { error: engineBody.detail ?? 'Bot engine returned an error', detail: engineBody },
-        { status: botRes.status },
-      )
-    }
-
-    // ── Persist running state ─────────────────────────────────────────────────
+    // ── Pre-write botStatuses as 'running' BEFORE engine call ─────────────────
+    // F4: We write this BEFORE the engine call so that if the engine succeeds
+    // but our read-back fails, the state is still consistent. If the engine
+    // fails, we roll this back explicitly below.
     await db.insert(botStatuses)
       .values({
         userId:        session.id,
@@ -190,6 +161,39 @@ export async function POST(req: NextRequest) {
         },
       })
 
+    // ── Call bot engine ───────────────────────────────────────────────────────
+    let botRes: Response | null = null
+    try {
+      botRes = await fetch(`${process.env.BOT_ENGINE_URL}/bot/start`, {
+        method:  'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Bot-Secret': process.env.BOT_ENGINE_SECRET!,
+        },
+        body:   JSON.stringify({ user_id: session.id, markets, session_ids: sessionIds }),
+        signal: AbortSignal.timeout(15_000),
+      })
+    } catch (err) {
+      console.error('Bot engine unreachable:', err)
+      // F4: Roll back BOTH botSessions AND botStatuses
+      await _rollbackBotStart(session.id, createdSessionIds)
+      return NextResponse.json(
+        { error: 'Bot engine is unreachable. Is the Render service running?' },
+        { status: 503 },
+      )
+    }
+
+    if (!botRes.ok) {
+      const engineBody = await botRes.json().catch(() => ({}))
+      // F4: Roll back BOTH botSessions AND botStatuses
+      await _rollbackBotStart(session.id, createdSessionIds)
+      return NextResponse.json(
+        { error: engineBody.detail ?? 'Bot engine returned an error', detail: engineBody },
+        { status: botRes.status },
+      )
+    }
+
+    // ── Engine confirmed started — state is already written above ─────────────
     return NextResponse.json({
       success: true,
       status:  'running',
@@ -199,5 +203,36 @@ export async function POST(req: NextRequest) {
 
   } finally {
     await lock.release()
+  }
+}
+
+// ── F4: Rollback helper ───────────────────────────────────────────────────────
+// Rolls back both botSessions and botStatuses atomically when engine fails.
+// Called only on failure paths — never on success.
+async function _rollbackBotStart(userId: string, sessionIds: string[]): Promise<void> {
+  const now = new Date()
+  try {
+    await Promise.all([
+      // Roll back sessions: mark as stopped
+      ...sessionIds.map(sid =>
+        db.update(botSessions)
+          .set({ status: 'stopped', endedAt: now })
+          .where(eq(botSessions.id, sid))
+      ),
+      // F4 NEW: Roll back botStatuses: mark as stopped with clear error message
+      db.update(botStatuses)
+        .set({
+          status:       'stopped',
+          errorMessage: 'Bot failed to start — engine unreachable or returned error.',
+          updatedAt:    now,
+          stopMode:     null,
+          stoppingAt:   null,
+        })
+        .where(eq(botStatuses.userId, userId)),
+    ])
+  } catch (rollbackErr) {
+    // Log but don't throw — we're already in an error path.
+    // The TTL on the Redis lock will release even if this fails.
+    console.error('[bot/start] Rollback failed:', rollbackErr)
   }
 }

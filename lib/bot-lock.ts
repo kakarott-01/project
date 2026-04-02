@@ -1,26 +1,45 @@
 // lib/bot-lock.ts
 // ================
-// Redis-based distributed lock for bot start/stop operations.
-// Prevents duplicate bot instances across multiple serverless workers.
+// F7 FIX: Distinguish Redis connection failure from lock contention.
 //
-// Uses SETNX (SET if Not eXists) + expiry for safe distributed locking.
-// Lock is automatically released after TTL even if the process crashes.
+// Before this fix, any Redis error (including network outage) caused
+// acquireBotLock to throw, which bubbled up as a 500 error. This meant
+// users could not stop the bot if Redis was temporarily down — the bot
+// kept running with no way to halt it.
+//
+// Fix: acquireBotLock now returns a third result type { acquired: false,
+// isRedisDown: true } when the Redis call itself fails. Callers handle
+// this differently per operation:
+//   - START: refuse (starting without lock is unsafe — could create duplicates)
+//   - STOP:  allow (stopping is always safe, worst case is a no-op)
+//   - complete-stop: allow (same reasoning as stop)
+//
+// The release() function on a Redis-down lock is a no-op (nothing to release).
 
 import { redis } from '@/lib/redis'
 
-const LOCK_TTL_SECONDS = 30  // max time a start/stop operation should take
+const LOCK_TTL_SECONDS = 30
 
 export type LockResult =
-  | { acquired: true;  release: () => Promise<void> }
-  | { acquired: false; reason: string }
+  | { acquired: true;  isRedisDown: false; release: () => Promise<void> }
+  | { acquired: false; isRedisDown: false; reason: string }
+  | { acquired: false; isRedisDown: true;  reason: string }
 
 /**
  * Attempt to acquire a per-user bot operation lock.
  *
  * Usage:
  *   const lock = await acquireBotLock(userId, 'start')
- *   if (!lock.acquired) return { error: lock.reason }
- *   try { ... } finally { await lock.release() }
+ *   if (!lock.acquired) {
+ *     if (lock.isRedisDown && operation === 'stop') {
+ *       // proceed without lock — stopping is safe
+ *     } else {
+ *       return { error: lock.reason }
+ *     }
+ *   }
+ *   try { ... } finally {
+ *     if (lock.acquired) await lock.release()
+ *   }
  */
 export async function acquireBotLock(
   userId: string,
@@ -30,26 +49,49 @@ export async function acquireBotLock(
   const key   = `bot_lock:${userId}`
   const value = `${operation}:${Date.now()}`
 
-  // NX = only set if key doesn't exist, EX = expire after ttlSeconds
-  const result = await redis.set(key, value, { nx: true, ex: ttlSeconds })
+  let result: string | null
+  try {
+    // NX = only set if key doesn't exist, EX = expire after ttlSeconds
+    result = await redis.set(key, value, { nx: true, ex: ttlSeconds })
+  } catch (redisError) {
+    // Redis is unreachable — not a lock contention, a connection failure.
+    console.error(`[bot-lock] Redis connection error for user=${userId}:`, redisError)
+    return {
+      acquired:    false,
+      isRedisDown: true,
+      reason:      'Redis is temporarily unavailable. Lock could not be acquired.',
+    }
+  }
 
   if (result === null) {
-    // Key already exists → another operation is in progress
-    const existing = await redis.get<string>(key)
-    const opName   = existing?.split(':')[0] ?? 'unknown'
+    // Key already exists → another operation is in progress (lock contention)
+    let existingOp = 'unknown'
+    try {
+      const existing = await redis.get<string>(key)
+      existingOp = existing?.split(':')[0] ?? 'unknown'
+    } catch {
+      // Best-effort — don't fail if we can't read the existing lock details
+    }
     return {
-      acquired: false,
-      reason:   `Bot is already being ${opName === 'start' ? 'started' : 'stopped'} — please wait.`,
+      acquired:    false,
+      isRedisDown: false,
+      reason:      `Bot is already being ${existingOp === 'start' ? 'started' : 'stopped'} — please wait.`,
     }
   }
 
   return {
-    acquired: true,
-    release:  async () => {
-      // Only delete if we still own the lock (value matches)
-      const current = await redis.get<string>(key)
-      if (current === value) {
-        await redis.del(key)
+    acquired:    true,
+    isRedisDown: false,
+    release: async () => {
+      try {
+        const current = await redis.get<string>(key)
+        if (current === value) {
+          await redis.del(key)
+        }
+      } catch (releaseError) {
+        // Redis down during release — lock will expire via TTL automatically.
+        // This is safe: the TTL ensures the lock is never held permanently.
+        console.warn(`[bot-lock] Could not release lock for user=${userId} (will expire via TTL):`, releaseError)
       }
     },
   }
@@ -59,13 +101,22 @@ export async function acquireBotLock(
  * Force-release a lock (emergency use only — admin/cleanup).
  */
 export async function forceReleaseBotLock(userId: string): Promise<void> {
-  await redis.del(`bot_lock:${userId}`)
+  try {
+    await redis.del(`bot_lock:${userId}`)
+  } catch (e) {
+    console.warn(`[bot-lock] Force-release failed for user=${userId}:`, e)
+  }
 }
 
 /**
  * Check if any lock is held for a user (read-only).
+ * Returns false if Redis is down (conservative: assume not locked).
  */
 export async function isBotLocked(userId: string): Promise<boolean> {
-  const val = await redis.get(`bot_lock:${userId}`)
-  return val !== null
+  try {
+    const val = await redis.get(`bot_lock:${userId}`)
+    return val !== null
+  } catch {
+    return false
+  }
 }

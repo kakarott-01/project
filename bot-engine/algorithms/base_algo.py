@@ -1,17 +1,39 @@
 """
-bot-engine/algorithms/base_algo.py  — v4
+bot-engine/algorithms/base_algo.py  — v5
 ==========================================
-FIX ORPHAN: _execute_live_trade() now handles the critical scenario where a
-            live order is placed on the exchange but the DB save returns None
-            (duplicate blocked). Previously if the cancel attempt failed,
-            the error was only logged and the trade was silently lost.
+F3 FIX: _close_trade() now ALWAYS removes symbol from _open_positions,
+        even when close_paper_trade/close_live_trade returns False
+        (trade already closed by another process).
 
-            Now: save_failed_live_order() is called so the trade appears in
-            the failed_live_orders table visible in the dashboard, and the
-            risk manager's open_trade_count is adjusted to prevent blocking
-            future trades indefinitely.
+        PROBLEM: Previously, if closed=False (double-close prevented),
+        the symbol remained in _open_positions. Next cycle, generate_signal
+        would see the position and call _check_exit again, which queries
+        fetch_ticker and attempts another close. This looped indefinitely
+        until bot restart, generating noise logs and unnecessary API calls.
 
-All other fixes (FIX 5, FIX C, FIX K, PERF P) from v3 unchanged.
+        FIX: Pop _open_positions REGARDLESS of the close DB result.
+        The DB is the source of truth — if it says the trade is closed,
+        our in-memory state must agree.
+
+F9 FIX: _execute_live_trade() now polls fetch_order() after placing
+        a live market order to get the ACTUAL filled quantity from the
+        exchange. This actual_quantity is passed to save_live_trade()
+        so the DB records what was really filled, not what was requested.
+
+        PROBLEM: place_order returns immediately after order submission.
+        The requested quantity (e.g., 0.001 BTC) may not fully fill —
+        partial fills are common on illiquid markets or during volatility.
+        The old code recorded requested_quantity as filled, causing PnL
+        calculations and exit logic to be based on incorrect position size.
+
+        FIX: After place_order, call fetch_order() once to get actual
+        filled qty. If fetch_order fails (exchange API error), fall back
+        to requested quantity with a warning (same as before).
+
+        IMPORTANT: F9 only applies to LIVE trading. Paper trading always
+        fills at the full requested quantity (simulated).
+
+All other fixes from v4 unchanged.
 """
 
 import json
@@ -47,7 +69,11 @@ def _load_config_cached(config_path: str) -> Optional[Dict]:
         return None
 
 
-RECONCILE_INTERVAL_SEC = 10 * 60
+# F8 FIX: Reconciliation interval reduced from 10 minutes to 2 minutes.
+# A 10-minute window was too wide for live trading — a user manually closing
+# a position on the exchange would leave the risk manager thinking the
+# position is still open for up to 10 minutes, blocking new trades.
+RECONCILE_INTERVAL_SEC = 2 * 60   # 2 minutes (was 10 * 60)
 
 
 class BaseAlgo(ABC):
@@ -121,11 +147,15 @@ class BaseAlgo(ABC):
             if not db_open:
                 self._reconciled = True
                 return
-            owned = [
-                t for t in db_open
-                if t.get("bot_session_ref") == self._session_ref
-                   or t.get("bot_session_ref") is None
-            ] if self._session_ref else db_open
+            owned = (
+                [
+                    t for t in db_open
+                    if t.get("bot_session_ref") == self._session_ref
+                       or t.get("bot_session_ref") is None
+                ]
+                if self._session_ref
+                else db_open
+            )
             if not owned:
                 self._reconciled = True
                 return
@@ -311,6 +341,23 @@ class BaseAlgo(ABC):
         self, symbol: str, exit_signal: str, trade_id: str,
         entry_price: float, original_side: str, balance: float,
     ):
+        """
+        F3 FIX: _open_positions is always cleaned up, regardless of whether
+        the DB close succeeds. This prevents infinite exit-retry loops.
+
+        Previous bug: if closed=False (trade already closed by another process
+        or concurrent call), the symbol stayed in _open_positions. Next cycle
+        would detect the position, call _check_exit, fetch ticker, attempt
+        close again → returned False again → infinite loop until restart.
+
+        Fix: Always pop _open_positions at the point we know the trade should
+        be closed. The DB WHERE status='open' guard prevents actual double-closes.
+        """
+        # F3 FIX: Pop _open_positions FIRST, before any async operations.
+        # If anything after this raises, the in-memory state is still correct.
+        if hasattr(self, "_open_positions"):
+            self._open_positions.pop(symbol, None)
+
         try:
             ticker     = await self.connector.fetch_ticker(symbol)
             exit_price = ticker.get("last")
@@ -318,10 +365,11 @@ class BaseAlgo(ABC):
                 logger.warning(f"[{self.name}] ❌ No price to close {symbol}")
                 return
 
+            # Verify the trade is still open in DB before attempting close
+            # (guards against race with close_all_engine or another cycle)
             open_row = await self.db.get_open_trade(self.user_id, symbol, self.market_type)
             if not open_row:
-                if hasattr(self, "_open_positions"):
-                    self._open_positions.pop(symbol, None)
+                # Already closed by another process — _open_positions already cleaned up above
                 logger.info(f"[{self.name}] ℹ️  {symbol} already closed in DB, skipping close")
                 return
 
@@ -334,9 +382,10 @@ class BaseAlgo(ABC):
 
             if self._paper_mode:
                 closed = await self.db.close_paper_trade(trade_id, exit_price, pnl, pnl_pct)
+                # F3 FIX: No position cleanup here — already done above.
+                # closed=False means another process closed it — that's fine.
                 if not closed:
-                    if hasattr(self, "_open_positions"):
-                        self._open_positions.pop(symbol, None)
+                    logger.info(f"[{self.name}] ℹ️  {symbol} close was a no-op (already closed by another process)")
                     return
                 logger.info(
                     f"[{self.name}] 🧪 PAPER CLOSE {symbol} entry={entry_price} exit={exit_price} PnL={pnl:+.4f}"
@@ -345,8 +394,7 @@ class BaseAlgo(ABC):
                 order  = await self.connector.place_order(symbol, exit_signal, quantity)
                 closed = await self.db.close_live_trade(trade_id, exit_price, pnl, pnl_pct, order.get("id", ""))
                 if not closed:
-                    if hasattr(self, "_open_positions"):
-                        self._open_positions.pop(symbol, None)
+                    logger.info(f"[{self.name}] ℹ️  {symbol} live close was a no-op (already closed)")
                     return
 
             self.risk.record_trade_closed(pnl)
@@ -354,18 +402,23 @@ class BaseAlgo(ABC):
 
         except Exception as e:
             logger.error(f"[{self.name}] ❌ Close trade failed {symbol}: {e}", exc_info=True)
+            # F3 FIX: _open_positions was already cleaned up before the try block.
+            # Even on exception, in-memory state is correct. Bot won't retry
+            # the exit loop. The DB record remains open until reconciliation.
 
     async def _execute_live_trade(self, symbol: str, signal: str, quantity: float, price: float):
         """
-        FIX ORPHAN: Handles the critical case where a live order is placed on the
-        exchange but the DB save returns None (duplicate blocked by constraint).
+        F9 FIX: After placing the order, call fetch_order() to get the actual
+        filled quantity from the exchange. Pass actual_quantity to save_live_trade()
+        so the DB records reality, not the request.
 
-        Previously: if cancel also failed, the error was only logged — real money
-        was committed to a position the system had no record of.
-
-        Now: save_failed_live_order() always records the failure for manual review,
-        and the risk manager open_trade_count is NOT incremented (since we have no
-        DB record), preventing the risk system from blocking future trades forever.
+        PARTIAL FILL BEHAVIOR:
+          - If actual_qty < requested_qty: trade saved with actual_qty.
+            On next exit, close_trade uses open_row["quantity"] (actual_qty).
+            PnL calculation uses the correct filled position size.
+          - If fetch_order fails: fall back to requested_qty with warning.
+          - If actual_qty = 0 (order rejected): discard staged open, save
+            failed order record, don't create trade in DB.
         """
         sl    = self.risk.calculate_stop_loss(price, signal)
         tp    = self.risk.calculate_take_profit(price, signal)
@@ -374,23 +427,52 @@ class BaseAlgo(ABC):
             order    = await self.connector.place_order(symbol, signal, quantity)
             order_id = order.get("id", "")
 
+            # F9 FIX: Fetch actual fill quantity from exchange
+            actual_quantity = await self._fetch_actual_fill(order_id, symbol, quantity)
+
+            if actual_quantity == 0.0:
+                # Order placed but nothing filled (rejected or cancelled immediately)
+                if hasattr(self, "_discard_staged_open"):
+                    self._discard_staged_open(symbol)
+                logger.error(
+                    f"[{self.name}] ❌ Live order {order_id} for {symbol} "
+                    f"filled 0 units — order was rejected/cancelled. Not recording trade."
+                )
+                # Save as failed order for visibility
+                await self.db.save_failed_live_order(
+                    user_id=self.user_id,
+                    exchange_name=self.connector.exchange_name,
+                    market_type=self.market_type,
+                    symbol=symbol,
+                    side=signal.lower(),
+                    quantity=quantity,
+                    entry_price=price,
+                    exchange_order_id=order_id,
+                    fail_reason="order_filled_zero",
+                    cancel_attempted=False,
+                    cancel_succeeded=False,
+                )
+                return
+
             trade_id = await self.db.save_live_trade(
                 self.user_id, symbol, signal, quantity,
                 price, sl, tp, order_id,
                 self.name, self.market_type,
                 session_ref=self._session_ref,
+                actual_quantity=actual_quantity,  # F9: pass actual fill
             )
 
             if trade_id:
-                # Happy path: order placed AND recorded in DB
                 if hasattr(self, "_confirm_staged_open"):
                     self._confirm_staged_open(symbol)
                 self.risk.record_trade_opened()
                 await self.risk.persist_state(self.db, self.user_id, self.market_type)
-                logger.info(f"[{self.name}] ✅ LIVE {signal} {quantity} {symbol} order={order_id}")
+                logger.info(
+                    f"[{self.name}] ✅ LIVE {signal} requested={quantity:.8f} "
+                    f"filled={actual_quantity:.8f} {symbol} order={order_id}"
+                )
             else:
-                # FIX ORPHAN: Order placed but DB rejected duplicate.
-                # Attempt to cancel the exchange order.
+                # DB rejected duplicate — attempt cancel
                 if hasattr(self, "_discard_staged_open"):
                     self._discard_staged_open(symbol)
 
@@ -415,7 +497,6 @@ class BaseAlgo(ABC):
                             "Recording for manual review."
                         )
 
-                # Always record the failure regardless of cancel outcome
                 fail_reason = (
                     "duplicate_blocked_cancel_ok" if cancel_succeeded
                     else "duplicate_blocked_cancel_failed" if cancel_attempted
@@ -427,7 +508,7 @@ class BaseAlgo(ABC):
                     market_type=self.market_type,
                     symbol=symbol,
                     side=signal.lower(),
-                    quantity=quantity,
+                    quantity=actual_quantity,
                     entry_price=price,
                     exchange_order_id=order_id if order_id else None,
                     fail_reason=fail_reason,
@@ -436,18 +517,16 @@ class BaseAlgo(ABC):
                     cancel_error=cancel_error,
                 )
 
-                # If cancel failed, there is a real open position on the exchange
-                # with no DB record. This MUST be manually reviewed.
                 if not cancel_succeeded and cancel_attempted:
                     logger.critical(
-                        f"[{self.name}] 💀 UNTRACKED LIVE POSITION: {signal} {quantity} {symbol} "
-                        f"order={order_id}. Cancel failed. MANUAL EXCHANGE ACTION REQUIRED. "
+                        f"[{self.name}] 💀 UNTRACKED LIVE POSITION: {signal} "
+                        f"filled={actual_quantity} {symbol} order={order_id}. "
+                        "Cancel failed. MANUAL EXCHANGE ACTION REQUIRED. "
                         "Position recorded in failed_live_orders table."
                     )
 
         except Exception as e:
             logger.error(f"[{self.name}] ❌ Live trade failed {symbol}: {e}", exc_info=True)
-            # If the order was placed before the exception, save it
             if order is not None:
                 order_id = order.get("id")
                 if order_id:
@@ -465,3 +544,82 @@ class BaseAlgo(ABC):
                         cancel_succeeded=False,
                     )
             raise
+
+    async def _fetch_actual_fill(
+        self, order_id: str, symbol: str, requested_qty: float
+    ) -> float:
+        """
+        F9: Fetch actual filled quantity for a just-placed order.
+
+        Polls fetch_order() up to 3 times (3 second intervals) waiting for
+        the order to settle. Market orders on liquid pairs typically fill
+        within 1 second, so 3 polls is generous.
+
+        Returns:
+          - Actual filled quantity (may be less than requested_qty for partial fills)
+          - 0.0 if order was cancelled/rejected
+          - requested_qty if fetch_order fails (fallback, with warning)
+        """
+        if not order_id:
+            logger.warning(f"[{self.name}] F9: No order_id — assuming full fill of {requested_qty:.8f}")
+            return requested_qty
+
+        MAX_POLLS    = 3
+        POLL_DELAY_S = 3.0
+
+        import asyncio
+
+        for poll in range(MAX_POLLS):
+            if poll > 0:
+                await asyncio.sleep(POLL_DELAY_S)
+            try:
+                order_info  = await self.connector.fetch_order(order_id, symbol)
+                exch_status = str(order_info.get("status", "unknown")).lower()
+                filled_qty  = float(order_info.get("filled", 0) or 0)
+
+                if exch_status in ("closed", "filled"):
+                    if abs(filled_qty - requested_qty) > 0.0001:
+                        logger.warning(
+                            f"[{self.name}] F9 partial fill detected: "
+                            f"symbol={symbol} requested={requested_qty:.8f} "
+                            f"filled={filled_qty:.8f}"
+                        )
+                    return filled_qty
+
+                elif exch_status in ("canceled", "cancelled", "rejected", "expired"):
+                    logger.warning(
+                        f"[{self.name}] F9: Order {order_id} {exch_status}. "
+                        f"filled_qty={filled_qty:.8f}"
+                    )
+                    return filled_qty  # may be partial fill before cancel
+
+                elif exch_status in ("open", "partially_filled", "partial"):
+                    # Still filling — keep polling
+                    logger.debug(
+                        f"[{self.name}] F9: Order {order_id} still {exch_status} "
+                        f"(poll {poll+1}/{MAX_POLLS}), filled so far={filled_qty:.8f}"
+                    )
+                    continue
+
+                else:
+                    # Unknown status — return what we have, try again
+                    logger.debug(
+                        f"[{self.name}] F9: Unknown order status '{exch_status}' "
+                        f"for {order_id} — continuing to poll"
+                    )
+                    continue
+
+            except Exception as e:
+                logger.warning(
+                    f"[{self.name}] F9: fetch_order failed for {order_id}: {e}. "
+                    f"Falling back to requested_qty={requested_qty:.8f}"
+                )
+                # fetch_order failed — fall through to return requested_qty below
+                return requested_qty
+
+        # Polls exhausted — order still not settled. Use requested_qty as fallback.
+        logger.warning(
+            f"[{self.name}] F9: Order {order_id} not settled after {MAX_POLLS} polls. "
+            f"Using requested_qty={requested_qty:.8f} as fallback."
+        )
+        return requested_qty
