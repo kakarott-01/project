@@ -3,29 +3,18 @@ import { getServerSession } from 'next-auth/next'
 import { authOptions }      from '@/lib/auth-options'
 import { verifySession }    from '@/lib/signed-cookie'  // FIX: HMAC-verified parse
 
-/**
- * lib/auth.ts — v2
- * =================
- * FIX: The legacy user_session cookie is now parsed via verifySession()
- *      which performs HMAC-SHA256 signature verification before trusting
- *      the payload.  Unsigned/legacy cookies are still accepted for backward
- *      compatibility but will be replaced with signed cookies on next login.
- */
-
 export async function auth() {
   const cookieStore   = cookies()
   const sessionCookie = cookieStore.get('user_session')?.value
 
-  // ── Legacy cookie path (email/OTP login) ──────────────────────────────────
-  // verifySession checks HMAC signature; returns null if invalid/unsigned
-  const legacy = verifySession(sessionCookie)
-  if (legacy?.id && legacy?.email) {
+  const signed = verifySession(sessionCookie)
+  if (signed?.id && signed?.email) {
     return {
-      ...legacy,
+      ...signed,
       user: {
-        id:    legacy.id,
-        email: legacy.email,
-        name:  legacy.name,
+        id:    signed.id,
+        email: signed.email,
+        name:  signed.name,
       },
     }
   }

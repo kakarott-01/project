@@ -6,10 +6,7 @@
  *
  * Cookie format: "<base64url(payload)>.<base64url(HMAC-SHA256(payload, secret))>"
  *
- * BACKWARD COMPAT: If the cookie value doesn't contain a "." (old unsigned
- * format), verifySession attempts a legacy JSON parse and returns the result.
- * This allows existing sessions to keep working while new sessions are signed.
- * Once all users log in again their cookies will be upgraded automatically.
+ * Legacy unsigned cookies are intentionally rejected.
  */
 
 import { createHmac, timingSafeEqual } from 'crypto'
@@ -43,21 +40,17 @@ export function signSession(payload: SessionPayload): string {
  * Verify and decode a signed session cookie.
  * Returns the payload on success, null on any failure (bad sig, malformed, etc.).
  *
- * Handles legacy unsigned cookies gracefully so existing sessions don't break.
+ * Legacy unsigned cookies are rejected.
  */
 export function verifySession(cookie: string | undefined): SessionPayload | null {
   if (!cookie) return null
 
-  // New signed format: "data.sig"
   const dotIdx = cookie.lastIndexOf('.')
-  if (dotIdx > 0) {
-    const data = cookie.slice(0, dotIdx)
-    const sig  = cookie.slice(dotIdx + 1)
-    return _verifySignedParts(data, sig)
-  }
+  if (dotIdx <= 0) return null
 
-  // Legacy format: plain JSON string (unsigned — accept but don't trust for sensitive ops)
-  return _parseLegacy(cookie)
+  const data = cookie.slice(0, dotIdx)
+  const sig  = cookie.slice(dotIdx + 1)
+  return _verifySignedParts(data, sig)
 }
 
 // ── Internal ──────────────────────────────────────────────────────────────────
@@ -80,15 +73,4 @@ function _verifySignedParts(data: string, providedSig: string): SessionPayload |
   } catch {
     return null
   }
-}
-
-function _parseLegacy(cookie: string): SessionPayload | null {
-  // Try raw JSON first (original format), then base64-decoded JSON
-  try {
-    return JSON.parse(cookie) as SessionPayload
-  } catch { /* ignore */ }
-  try {
-    return JSON.parse(Buffer.from(cookie, 'base64').toString('utf8')) as SessionPayload
-  } catch { /* ignore */ }
-  return null
 }

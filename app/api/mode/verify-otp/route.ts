@@ -8,6 +8,11 @@ import { NextRequest, NextResponse } from 'next/server'
 import { auth }                       from '@/lib/auth'
 import { redis }                      from '@/lib/redis'
 import { issueSecureToken }           from '@/lib/secure-token'  // FIX
+import {
+  checkOtpVerifyLimit,
+  otpVerifyLimitMessage,
+  resetOtpVerifyLimit,
+} from '@/lib/otp-rate-limit'
 
 export async function POST(req: NextRequest) {
   const session = await auth()
@@ -20,7 +25,25 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'OTP required' }, { status: 400 })
   }
 
-  const raw = await redis.get(`mode_switch_otp:${session.id}`)
+  const limitKey = `mode_switch:${session.id}`
+  const rateLimit = await checkOtpVerifyLimit(limitKey)
+  if (!rateLimit.allowed) {
+    return NextResponse.json(
+      { error: otpVerifyLimitMessage(rateLimit.retryAfterSec) },
+      { status: 429 },
+    )
+  }
+
+  let raw: unknown
+  try {
+    raw = await redis.get(`mode_switch_otp:${session.id}`)
+  } catch (redisError) {
+    console.error('mode verify redis error:', redisError)
+    return NextResponse.json(
+      { error: 'Verification service temporarily unavailable. Please try again.' },
+      { status: 503 },
+    )
+  }
 
   if (raw === null || raw === undefined) {
     return NextResponse.json({ error: 'No OTP found. Please request a new one.' }, { status: 401 })
@@ -33,8 +56,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid OTP.' }, { status: 401 })
   }
 
-  // Burn OTP
-  await redis.del(`mode_switch_otp:${session.id}`)
+  await Promise.all([
+    redis.del(`mode_switch_otp:${session.id}`),
+    resetOtpVerifyLimit(limitKey),
+  ])
 
   // FIX: HMAC-signed token (was base64(userId:timestamp) — forgeable)
   const token = issueSecureToken(session.id, 'mode_switch')

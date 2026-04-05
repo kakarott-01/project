@@ -15,9 +15,19 @@ export async function POST(req: NextRequest) {
   }
 
   const rateLimitKey = `reveal_otp_rate:${session.id}`
-  const raw          = await redis.get<string>(rateLimitKey)
-  const limit        = raw ? JSON.parse(raw) : null
-  const now          = Date.now()
+  let limit: { count: number; resetAt: number } | null = null
+  const now = Date.now()
+
+  try {
+    const raw = await redis.get<string>(rateLimitKey)
+    limit = raw ? JSON.parse(raw) : null
+  } catch (redisError) {
+    console.error('Redis unavailable during reveal OTP rate-limit read:', redisError)
+    return NextResponse.json(
+      { error: 'Verification service temporarily unavailable. Please try again.' },
+      { status: 503 },
+    )
+  }
 
   if (limit && now < limit.resetAt && limit.count >= 3) {
     return NextResponse.json({ error: 'Too many requests. Wait a few minutes.' }, { status: 429 })
@@ -26,10 +36,26 @@ export async function POST(req: NextRequest) {
   const newLimit = (!limit || now >= limit.resetAt)
     ? { count: 1, resetAt: now + 10 * 60 * 1000 }
     : { ...limit, count: limit.count + 1 }
-  await redis.set(rateLimitKey, JSON.stringify(newLimit), { ex: 600 })
+  try {
+    await redis.set(rateLimitKey, JSON.stringify(newLimit), { ex: 600 })
+  } catch (redisError) {
+    console.error('Redis unavailable during reveal OTP rate-limit store:', redisError)
+    return NextResponse.json(
+      { error: 'Verification service temporarily unavailable. Please try again.' },
+      { status: 503 },
+    )
+  }
 
   const otp = generateSecureOtp()  // FIX: was Math.random()
-  await redis.set(`reveal_otp:${session.id}`, otp, { ex: 300 })
+  try {
+    await redis.set(`reveal_otp:${session.id}`, otp, { ex: 300 })
+  } catch (redisError) {
+    console.error('Redis unavailable during reveal OTP store:', redisError)
+    return NextResponse.json(
+      { error: 'Verification service temporarily unavailable. Please try again.' },
+      { status: 503 },
+    )
+  }
 
   console.log(`\n🔐 Reveal OTP for ${session.email}: ${otp}\n`)
 

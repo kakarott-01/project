@@ -28,11 +28,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db }                         from '@/lib/db'
 import { accessCodes, users }         from '@/lib/schema'
-import { eq, and, isNotNull }         from 'drizzle-orm'
+import { eq, and }                    from 'drizzle-orm'
 import bcrypt                          from 'bcryptjs'
 import { createHash }                  from 'crypto'
 import { getClientIp }                 from '@/lib/utils'
-import { getToken }                    from 'next-auth/jwt'
+import { auth }                        from '@/lib/auth'
 import { redis }                       from '@/lib/redis'
 
 const MAX_ATTEMPTS     = 3
@@ -65,8 +65,8 @@ function codeSha256(code: string): string {
 
 export async function POST(req: NextRequest) {
   try {
-    const token = await getToken({ req, secret: process.env.NEXTAUTH_SECRET })
-    if (!token?.email) {
+    const session = await auth()
+    if (!session?.email) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
@@ -133,16 +133,16 @@ export async function POST(req: NextRequest) {
 
     // Burn the code
     await db.update(accessCodes)
-      .set({ isBurned: true, burnedAt: new Date(), burnedByIp: ip, usedByEmail: token.email })
+      .set({ isBurned: true, burnedAt: new Date(), burnedByIp: ip, usedByEmail: session.email })
       .where(eq(accessCodes.id, matchedCode.id))
 
     // Whitelist user
     await db.update(users)
       .set({ isWhitelisted: true })
-      .where(eq(users.email, token.email))
+      .where(eq(users.email, session.email))
 
     await clearRateLimit(ip)
-    console.info(`✅ Access granted → ${token.email}`)
+    console.info(`✅ Access granted → ${session.email}`)
 
     return NextResponse.json({ success: true })
   } catch (error) {

@@ -18,6 +18,14 @@ import { botStatuses, botSessions, exchangeApis, marketConfigs } from '@/lib/sch
 import { eq, and, inArray } from 'drizzle-orm'
 import { acquireBotLock } from '@/lib/bot-lock'
 
+type MarketName = 'indian' | 'crypto' | 'commodities' | 'global'
+
+const VALID_MARKETS = new Set<MarketName>(['indian', 'crypto', 'commodities', 'global'])
+
+function isMarketName(value: unknown): value is MarketName {
+  return typeof value === 'string' && VALID_MARKETS.has(value as MarketName)
+}
+
 export async function POST(req: NextRequest) {
   const session = await auth()
   if (!session?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -38,10 +46,25 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json().catch(() => ({}))
-    const { markets } = body
+    const rawMarkets = body?.markets
 
-    if (!markets || !Array.isArray(markets) || markets.length === 0) {
+    if (!rawMarkets || !Array.isArray(rawMarkets) || rawMarkets.length === 0) {
       return NextResponse.json({ error: 'No markets specified' }, { status: 400 })
+    }
+
+    const invalidMarkets = rawMarkets.filter(
+      (market: unknown) => !isMarketName(market),
+    )
+    if (invalidMarkets.length > 0) {
+      return NextResponse.json(
+        { error: `Invalid market(s): ${invalidMarkets.join(', ')}` },
+        { status: 400 },
+      )
+    }
+
+    const markets: MarketName[] = Array.from(new Set(rawMarkets as MarketName[]))
+    if (markets.length !== rawMarkets.length) {
+      return NextResponse.json({ error: 'Duplicate markets in request' }, { status: 400 })
     }
 
     // ── Check if already running or stopping ──────────────────────────────────

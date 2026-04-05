@@ -6,6 +6,11 @@ import { accessCodes }                from '@/lib/schema'
 import { eq }                         from 'drizzle-orm'
 import { redis }                      from '@/lib/redis'
 import { signSession }                from '@/lib/signed-cookie'  // FIX: signed cookie
+import {
+  checkOtpVerifyLimit,
+  otpVerifyLimitMessage,
+  resetOtpVerifyLimit,
+} from '@/lib/otp-rate-limit'
 
 const sql = neon(process.env.DATABASE_URL!)
 
@@ -17,9 +22,27 @@ export async function POST(req: NextRequest) {
     }
 
     const normalizedEmail = email.toLowerCase().trim()
+    const limitKey = `login_otp:${normalizedEmail}`
+
+    const rateLimit = await checkOtpVerifyLimit(limitKey)
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        { error: otpVerifyLimitMessage(rateLimit.retryAfterSec) },
+        { status: 429 },
+      )
+    }
 
     // ── Verify OTP from Redis ─────────────────────────────────────────────────
-    const raw = await redis.get(`login_otp:${normalizedEmail}`)
+    let raw: unknown
+    try {
+      raw = await redis.get(`login_otp:${normalizedEmail}`)
+    } catch (redisError) {
+      console.error('verify-otp redis error:', redisError)
+      return NextResponse.json(
+        { error: 'Verification service temporarily unavailable. Please try again.' },
+        { status: 503 },
+      )
+    }
 
     if (raw === null || raw === undefined) {
       return NextResponse.json({ error: 'Invalid or expired code' }, { status: 401 })
@@ -32,8 +55,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Invalid or expired code' }, { status: 401 })
     }
 
-    // Burn after use
-    await redis.del(`login_otp:${normalizedEmail}`)
+    await Promise.all([
+      redis.del(`login_otp:${normalizedEmail}`),
+      resetOtpVerifyLimit(limitKey),
+    ])
 
     // Find existing user
     const existing = await sql`SELECT id FROM users WHERE email = ${normalizedEmail} LIMIT 1`

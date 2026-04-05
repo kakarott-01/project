@@ -74,23 +74,31 @@ export async function GET(req: NextRequest) {
     .groupBy(trades.marketType)
 
   // ── Cumulative P&L series (for chart) ─────────────────────────────────────
-  const closedTrades = await db
+  // Bound the dataset so a long-lived account cannot blow up a serverless
+  // response or the client chart. Aggregate by day to preserve cumulative
+  // accuracy while keeping the payload compact.
+  const oneYearAgo = new Date()
+  oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1)
+
+  const closedTradeDays = await db
     .select({
-      closedAt: trades.closedAt,
-      pnl:      sql<number>`pnl::float`,
+      date: sql<string>`date(closed_at)::text`,
+      pnl: sql<number>`coalesce(sum(pnl), 0)::float`,
     })
     .from(trades)
     .where(and(
       ...conditions,
       eq(trades.status, 'closed' as any),
+      gte(trades.closedAt, oneYearAgo),
     ))
-    .orderBy(trades.closedAt)
+    .groupBy(sql`date(closed_at)`)
+    .orderBy(sql`date(closed_at)`)
 
   let cumulative = 0
-  const cumPnl = closedTrades.map(t => {
+  const cumPnl = closedTradeDays.map(t => {
     cumulative += t.pnl ?? 0
     return {
-      date: t.closedAt?.toISOString().slice(0, 10) ?? '',
+      date: t.date,
       pnl:  Math.round(cumulative * 100) / 100,
     }
   })

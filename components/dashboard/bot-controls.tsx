@@ -23,8 +23,6 @@ const MARKETS = [
   { id: 'global',      label: '🌐 Global' },
 ]
 
-let cleanupFiredThisSession = false
-
 async function safeJson(res: Response): Promise<any> {
   try { return await res.json() } catch { return {} }
 }
@@ -171,11 +169,13 @@ export function BotControls({ botData }: { botData: any }) {
   const [actionError,     setActionError]   = useState<string | null>(null)
   const [showStopModal,   setShowStopModal] = useState(false)
   const isFiringRef = useRef(false)
+  const prevStatusRef = useRef<string>('unknown')
 
   const status:         string  = botData?.status         ?? 'stopped'
   const stopMode:       string  = botData?.stopMode       ?? ''
   const openTradeCount: number  = botData?.openTradeCount ?? 0
   const timeoutWarning: boolean = botData?.timeoutWarning ?? false
+  const botErrorMessage: string | null = botData?.errorMessage ?? null
 
   const isRunning  = status === 'running'
   const isStopping = status === 'stopping'
@@ -195,12 +195,21 @@ export function BotControls({ botData }: { botData: any }) {
   )
 
   useEffect(() => {
-    if (cleanupFiredThisSession) return
-    cleanupFiredThisSession = true
+    const prevStatus = prevStatusRef.current
+    prevStatusRef.current = status
+
+    const wasActive = prevStatus === 'running' || prevStatus === 'stopping'
+    const isNowDone = status === 'stopped' || status === 'error'
+
+    if (!wasActive || !isNowDone) return
+
     fetch('/api/bot/cleanup', { method: 'POST' })
-      .then(() => qc.invalidateQueries({ queryKey: ['bot-history'] }))
+      .then(() => {
+        qc.invalidateQueries({ queryKey: ['bot-history'] })
+        qc.invalidateQueries({ queryKey: ['bot-status'] })
+      })
       .catch(() => null)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [qc, status])
 
   const startMut = useMutation({
     mutationFn: async () => {
@@ -254,11 +263,6 @@ export function BotControls({ botData }: { botData: any }) {
       }))
       return { prev }
     },
-    onSuccess: (data) => {
-      if ((data?.status ?? 'stopping') === 'stopped') {
-        cleanupFiredThisSession = false
-      }
-    },
     onError: (err: Error, _vars, ctx) => {
       if (ctx?.prev) qc.setQueryData(['bot-status'], ctx.prev)
       setActionError(err.message)
@@ -310,6 +314,17 @@ export function BotControls({ botData }: { botData: any }) {
           <AlertTriangle className="w-3 h-3" />
           {hasLiveMarkets ? 'Live Mode Active — real trades' : 'Paper Mode Active — no real trades'}
         </div>
+
+        {status === 'error' && botErrorMessage && (
+          <div className="flex items-start gap-2 px-3 py-2.5 rounded-xl bg-red-900/20 border border-red-800/30 max-w-xs">
+            <AlertTriangle className="w-3.5 h-3.5 text-red-400 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-xs font-semibold text-red-300 mb-0.5">Bot Error</p>
+              <p className="text-xs text-red-400/80 leading-relaxed">{botErrorMessage}</p>
+              <p className="text-xs text-gray-600 mt-1">Check the exchange for any position requiring manual action.</p>
+            </div>
+          </div>
+        )}
 
         {!isRunning && !isStopping && !isBusy && (
           <div className="flex flex-wrap gap-1.5 justify-end">

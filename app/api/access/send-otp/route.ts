@@ -45,18 +45,34 @@ export async function POST(req: NextRequest) {
     const normalizedEmail = email.toLowerCase().trim()
     const ip = getClientIp(req)
 
-    const ipLimit = await canSendOtp(`ip:${ip}`)
-    if (!ipLimit.ok) {
-      return NextResponse.json({ error: 'Too many OTP requests from this IP. Try again later.' }, { status: 429 })
-    }
+    try {
+      const ipLimit = await canSendOtp(`ip:${ip}`)
+      if (!ipLimit.ok) {
+        return NextResponse.json({ error: 'Too many OTP requests from this IP. Try again later.' }, { status: 429 })
+      }
 
-    const emailLimit = await canSendOtp(`email:${normalizedEmail}`)
-    if (!emailLimit.ok) {
-      return NextResponse.json({ error: 'Too many OTP requests for this email. Try again later.' }, { status: 429 })
+      const emailLimit = await canSendOtp(`email:${normalizedEmail}`)
+      if (!emailLimit.ok) {
+        return NextResponse.json({ error: 'Too many OTP requests for this email. Try again later.' }, { status: 429 })
+      }
+    } catch (redisError) {
+      console.error('Redis unavailable during login OTP rate limiting:', redisError)
+      return NextResponse.json(
+        { error: 'Verification service temporarily unavailable. Please try again.' },
+        { status: 503 },
+      )
     }
 
     const otp = generateSecureOtp()  // FIX: was Math.random()
-    await redis.set(`login_otp:${normalizedEmail}`, otp, { ex: OTP_EXPIRY_SEC })
+    try {
+      await redis.set(`login_otp:${normalizedEmail}`, otp, { ex: OTP_EXPIRY_SEC })
+    } catch (redisError) {
+      console.error('Redis unavailable during login OTP store:', redisError)
+      return NextResponse.json(
+        { error: 'Verification service temporarily unavailable. Please try again.' },
+        { status: 503 },
+      )
+    }
 
     console.log(`\n🔐 OTP for ${normalizedEmail}: ${otp}\n`)
 
