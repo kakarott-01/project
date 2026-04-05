@@ -1,17 +1,17 @@
-// app/api/bot/stop/route.ts — v2
+// app/api/bot/stop/route.ts — v3
 // =================================
-// F7 FIX: If Redis is DOWN, stop is allowed to proceed without a lock.
+// FIX 1 (500 on stop): _handleStop was called inside a try/finally block
+// but errors it threw were NOT caught — only the finally (lock release) ran,
+// and the uncaught error propagated as a Vercel 500 with no JSON body.
 //
-// Reasoning: stopping is always safe — worst case is a redundant no-op.
-// The _doImmediateStop function has its own DB-level idempotency guard
-// (F6 fix in bot-stop.ts), so concurrent stop calls are handled safely
-// even without the Redis lock. Refusing to stop when Redis is down would
-// leave the bot running with no way to halt it.
+// Now _handleStop is wrapped in try/catch. Any internal error (DB hiccup,
+// Neon connection timeout, etc.) returns a clean 500 JSON response instead
+// of a raw crash.
 //
-// Contrast with START: start without a lock is UNSAFE (could create
-// duplicate sessions), so start refuses when Redis is down.
+// FIX 2 (Redis-down stop): unchanged from v2 — stop proceeds without lock
+// when Redis is unreachable (safe because _doImmediateStop has DB-level guard).
 //
-// All stop mode logic unchanged from v1.
+// All stop mode logic unchanged from v2.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
@@ -47,7 +47,10 @@ export async function POST(req: NextRequest) {
         return await _handleStop(session.id, mode)
       } catch (e) {
         console.error('[bot/stop] Stop failed while Redis down:', e)
-        return NextResponse.json({ error: 'Failed to stop bot. Please try again.' }, { status: 500 })
+        return NextResponse.json(
+          { error: 'Failed to stop bot. Please try again.' },
+          { status: 500 }
+        )
       }
     }
     // Lock contention — another start/stop in progress
@@ -55,7 +58,16 @@ export async function POST(req: NextRequest) {
   }
 
   try {
+    // FIX: _handleStop errors are now caught here instead of propagating
+    // as an unhandled exception (which caused Vercel 500 with no JSON body).
     return await _handleStop(session.id, mode)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    console.error(`[bot/stop] _handleStop failed for user=${session.id}:`, e)
+    return NextResponse.json(
+      { error: `Stop operation failed: ${msg}` },
+      { status: 500 }
+    )
   } finally {
     await lock.release()
   }

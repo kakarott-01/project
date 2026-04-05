@@ -1,32 +1,109 @@
-// ═══════════════════════════════════════════════════════════════════════════════
-// app/dashboard/page.tsx  — FIXED
-// ═══════════════════════════════════════════════════════════════════════════════
-// FIX (medium): Dashboard P&L chart was recalculating cumulative PnL from the
-//               /api/trades endpoint which is limited to 50 rows. Users with
-//               >50 trades saw a partial/incorrect cumulative chart.
-//
-//               Now fetches cumPnl from /api/performance which has NO row limit
-//               and returns pre-computed cumulative data.
-// ═══════════════════════════════════════════════════════════════════════════════
-
 'use client'
-import { useQuery }       from '@tanstack/react-query'
-import { TrendingUp, Activity, DollarSign } from 'lucide-react'
-import { PnlChart }       from '@/components/charts/pnl-chart'
-import { TradeTable }     from '@/components/dashboard/trade-table'
-import { BotControls }    from '@/components/dashboard/bot-controls'
+import { useQuery } from '@tanstack/react-query'
+import {
+  TrendingUp, TrendingDown, Activity, DollarSign,
+  BarChart3, Layers, ArrowUpRight,
+} from 'lucide-react'
+import { PnlChart } from '@/components/charts/pnl-chart'
+import { TradeTable } from '@/components/dashboard/trade-table'
+import { BotControls } from '@/components/dashboard/bot-controls'
 import { formatCurrency } from '@/lib/utils'
 
+// ── Compact stat card for the top row ─────────────────────────────────────────
+function StatCard({
+  label,
+  value,
+  sub,
+  color,
+  icon: Icon,
+  trend,
+}: {
+  label: string
+  value: string
+  sub: string
+  color: string
+  icon: React.ElementType
+  trend?: 'up' | 'down' | null
+}) {
+  return (
+    <div className="card flex flex-col gap-2 min-w-0 hover:border-gray-700 transition-colors">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-gray-500 uppercase tracking-widest">{label}</span>
+        <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${
+          color === 'text-emerald-400' ? 'bg-emerald-400/10' :
+          color === 'text-red-400'     ? 'bg-red-400/10' :
+          color === 'text-brand-500'   ? 'bg-brand-500/10' :
+          'bg-gray-800'
+        }`}>
+          <Icon className={`w-3.5 h-3.5 ${color}`} />
+        </div>
+      </div>
+      <div>
+        <p className={`text-2xl font-bold tracking-tight ${color}`}>{value}</p>
+        <p className="text-xs text-gray-600 mt-0.5">{sub}</p>
+      </div>
+    </div>
+  )
+}
+
+// ── Compact bot status summary for the top row ────────────────────────────────
+function BotStatusCard({
+  status,
+  activeMarkets,
+  openTradeCount,
+}: {
+  status: string
+  activeMarkets: string[]
+  openTradeCount: number
+}) {
+  const isRunning  = status === 'running'
+  const isStopping = status === 'stopping'
+  const isError    = status === 'error'
+
+  const dotColor = isRunning  ? 'bg-brand-500 animate-pulse' :
+                   isStopping ? 'bg-amber-400 animate-pulse' :
+                   isError    ? 'bg-red-500' : 'bg-gray-600'
+
+  const badgeStyle = isRunning  ? 'bg-brand-500/10 text-brand-500 border-brand-500/20' :
+                     isStopping ? 'bg-amber-400/10 text-amber-400 border-amber-400/20' :
+                     isError    ? 'bg-red-500/10 text-red-400 border-red-500/20' :
+                                  'bg-gray-800 text-gray-500 border-gray-700'
+
+  return (
+    <div className="card flex flex-col gap-2 min-w-0 hover:border-gray-700 transition-colors">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-gray-500 uppercase tracking-widest">Bot Status</span>
+        <span className={`w-7 h-7 rounded-lg flex items-center justify-center bg-gray-800`}>
+          <Layers className="w-3.5 h-3.5 text-gray-500" />
+        </span>
+      </div>
+      <div>
+        <div className="flex items-center gap-2">
+          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
+          <p className={`text-2xl font-bold tracking-tight capitalize ${
+            isRunning ? 'text-brand-500' : isError ? 'text-red-400' : 'text-gray-400'
+          }`}>
+            {status.charAt(0).toUpperCase() + status.slice(1)}
+          </p>
+        </div>
+        <p className="text-xs text-gray-600 mt-0.5">
+          {activeMarkets.length > 0
+            ? activeMarkets.join(' · ')
+            : 'No active markets'}
+        </p>
+      </div>
+    </div>
+  )
+}
+
+// ── Main dashboard page ───────────────────────────────────────────────────────
 export default function DashboardPage() {
-  // Accurate summary stats — no row limit
   const { data: summaryData } = useQuery({
     queryKey: ['trades-summary'],
     queryFn:  () => fetch('/api/trades/summary').then(r => r.json()),
     refetchInterval: 15_000,
   })
 
-  // FIX: Fetch cumulative PnL from /api/performance (full history, no row limit)
-  // Use staleTime=60s — this chart doesn't need to be as fresh as stat cards
   const { data: perfData } = useQuery({
     queryKey: ['performance-chart'],
     queryFn:  () => fetch('/api/performance').then(r => r.json()),
@@ -34,7 +111,6 @@ export default function DashboardPage() {
     refetchInterval: 60_000,
   })
 
-  // Recent trades for the table only (50-row limit is fine for a preview table)
   const { data: tradesData } = useQuery({
     queryKey: ['trades'],
     queryFn:  () => fetch('/api/trades?limit=50').then(r => r.json()),
@@ -49,122 +125,132 @@ export default function DashboardPage() {
 
   const { data: strategyConfigData } = useQuery({
     queryKey: ['strategy-configs'],
-    queryFn: () => fetch('/api/strategy-config').then(r => r.json()),
+    queryFn:  () => fetch('/api/strategy-config').then(r => r.json()),
     staleTime: 30_000,
   })
 
-  const summary        = summaryData ?? { totalPnl: 0, winRate: 0, total: 0, closed: 0 }
+  const summary        = summaryData ?? { totalPnl: 0, totalFees: 0, winRate: 0, total: 0, closed: 0 }
   const recentTrades   = tradesData?.trades?.slice(0, 10) ?? []
-  // FIX: Use pre-computed cumPnl from performance endpoint (full history)
   const cumPnlData     = perfData?.cumPnl ?? []
 
   const botStatus        = botData?.status ?? 'stopped'
-  const botIsRunning     = botStatus === 'running'
   const botActiveMarkets = botData?.activeMarkets ?? []
+  const openTradeCount   = botData?.openTradeCount ?? 0
+
   const aggressiveMarkets = (strategyConfigData?.markets ?? [])
-    .filter((market: any) => market.executionMode === 'AGGRESSIVE')
-    .map((market: any) => market.marketType)
+    .filter((m: any) => m.executionMode === 'AGGRESSIVE')
+    .map((m: any) => m.marketType)
+
+  const pnlPositive = summary.totalPnl >= 0
+  const winPositive = summary.winRate >= 50
 
   return (
-    <div className="space-y-5 max-w-7xl mx-auto px-3 sm:px-4">
+    <div className="flex flex-col gap-5 max-w-[1400px] mx-auto">
 
-      {/* Header */}
-      <div className="flex items-start justify-between">
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold text-gray-100">Dashboard</h1>
+          <h1 className="text-xl font-semibold text-gray-100 tracking-tight">Dashboard</h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            {new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' })}
+            {new Date().toLocaleDateString('en-IN', {
+              weekday: 'long', day: 'numeric', month: 'long'
+            })}
           </p>
         </div>
-        <BotControls botData={botData} />
+        {aggressiveMarkets.length > 0 && (
+          <div className="flex items-center gap-2 bg-red-950/30 border border-red-900/35 rounded-xl px-3 py-1.5 text-xs text-red-300">
+            <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse flex-shrink-0" />
+            AGGRESSIVE: {aggressiveMarkets.join(', ')}
+          </div>
+        )}
       </div>
 
-      {aggressiveMarkets.length > 0 && (
-        <div className="bg-red-950/25 border border-red-900/35 rounded-xl px-4 py-3 text-sm text-red-200">
-          AGGRESSIVE MODE ENABLED for: {aggressiveMarkets.join(', ')}. Strategies run independently, volatility is higher, and opposite trades may occur when hedge mode is active.
-        </div>
-      )}
+      {/* ── Top row: 4 stat cards ───────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <StatCard
+          label="Net P&L"
+          value={formatCurrency(summary.totalPnl)}
+          sub={typeof summary.totalFees === 'number'
+            ? `Fees paid ${formatCurrency(summary.totalFees)}`
+            : 'All closed trades'}
+          color={pnlPositive ? 'text-emerald-400' : 'text-red-400'}
+          icon={pnlPositive ? TrendingUp : TrendingDown}
+          trend={pnlPositive ? 'up' : 'down'}
+        />
+        <StatCard
+          label="Win Rate"
+          value={`${summary.winRate.toFixed(1)}%`}
+          sub={`${summary.closed} closed trades`}
+          color={winPositive ? 'text-emerald-400' : 'text-red-400'}
+          icon={Activity}
+        />
+        <StatCard
+          label="Total Trades"
+          value={summary.total.toLocaleString()}
+          sub="Since inception"
+          color="text-gray-200"
+          icon={BarChart3}
+        />
+        {botLoading && !botData ? (
+          <div className="card flex flex-col gap-2">
+            <div className="h-3 w-20 bg-gray-800 rounded animate-pulse" />
+            <div className="h-7 w-24 bg-gray-800 rounded animate-pulse mt-1" />
+            <div className="h-3 w-28 bg-gray-800 rounded animate-pulse" />
+          </div>
+        ) : (
+          <BotStatusCard
+            status={botStatus}
+            activeMarkets={botActiveMarkets}
+            openTradeCount={openTradeCount}
+          />
+        )}
+      </div>
 
-      {/* Stat cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
+      {/* ── Main section: chart (2/3) + bot controls (1/3) ─────────────────── */}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
 
-        <div className="stat-card">
-          <div className="flex items-center justify-between mb-1">
-            <span className="stat-label">Net P&L</span>
-            <DollarSign className="w-4 h-4 text-gray-700" />
-          </div>
-          <div className={`stat-value ${summary.totalPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}`}>
-            {formatCurrency(summary.totalPnl)}
-          </div>
-          <span className="stat-sub">
-            All time
-            {typeof summary.totalFees === 'number' ? ` · Fees ${formatCurrency(summary.totalFees)}` : ''}
-          </span>
-        </div>
-
-        <div className="stat-card">
-          <div className="flex items-center justify-between mb-1">
-            <span className="stat-label">Win Rate</span>
-            <Activity className="w-4 h-4 text-gray-700" />
-          </div>
-          <div className={`stat-value ${summary.winRate >= 50 ? 'pnl-positive' : 'pnl-negative'}`}>
-            {summary.winRate.toFixed(1)}%
-          </div>
-          <span className="stat-sub">{summary.closed} closed trades</span>
-        </div>
-
-        <div className="stat-card">
-          <div className="flex items-center justify-between mb-1">
-            <span className="stat-label">Total Trades</span>
-            <TrendingUp className="w-4 h-4 text-gray-700" />
-          </div>
-          <div className="stat-value">{summary.total}</div>
-          <span className="stat-sub">Since inception</span>
-        </div>
-
-        <div className="stat-card">
-          <div className="flex items-center justify-between mb-1">
-            <span className="stat-label">Bot Status</span>
-            {botLoading && !botData ? (
-              <span className="w-2 h-2 rounded-full bg-gray-700 animate-pulse" />
-            ) : (
-              <span className={`w-2 h-2 rounded-full ${botIsRunning ? 'bg-brand-500 animate-pulse' : 'bg-gray-700'}`} />
-            )}
-          </div>
-          {botLoading && !botData ? (
-            <>
-              <div className="h-5 w-20 bg-gray-800 rounded animate-pulse mb-1" />
-              <div className="h-3 w-28 bg-gray-800 rounded animate-pulse" />
-            </>
-          ) : (
-            <>
-              <div className={`stat-value text-base font-medium ${botIsRunning ? 'text-brand-500' : 'text-gray-500'}`}>
-                {botIsRunning ? 'Running' : 'Stopped'}
-              </div>
-              <span className="stat-sub">
-                {botActiveMarkets.length ? botActiveMarkets.join(' · ') : 'No active markets'}
+        {/* P&L Chart — 2/3 width */}
+        <div className="xl:col-span-2 card flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-200">Cumulative P&L</h2>
+              <p className="text-xs text-gray-500 mt-0.5">All time performance</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${
+                pnlPositive
+                  ? 'bg-emerald-400/10 text-emerald-400 border-emerald-400/20'
+                  : 'bg-red-400/10 text-red-400 border-red-400/20'
+              }`}>
+                {pnlPositive ? '▲' : '▼'} {formatCurrency(Math.abs(summary.totalPnl))}
               </span>
-            </>
-          )}
+            </div>
+          </div>
+
+          <div className="h-[220px] sm:h-[260px]">
+            <PnlChart cumPnlData={cumPnlData} />
+          </div>
         </div>
 
-      </div>
-
-      {/* P&L Chart — FIX: uses full-history cumPnl from /api/performance */}
-      <div className="card">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-sm font-medium text-gray-300">Cumulative P&L</h2>
-          <span className="badge-gray">All time</span>
+        {/* Bot Controls — 1/3 width */}
+        <div className="xl:col-span-1 flex flex-col">
+          <BotControls botData={botData} />
         </div>
-        <PnlChart cumPnlData={cumPnlData} />
       </div>
 
-      {/* Recent Trades */}
-      <div className="card">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-sm font-medium text-gray-300">Recent Trades</h2>
-          <a href="/dashboard/trades" className="text-xs text-brand-500 hover:text-brand-600 transition-colors">
-            View all →
+      {/* ── Recent trades table ─────────────────────────────────────────────── */}
+      <div className="card flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-gray-200">Recent Trades</h2>
+            <p className="text-xs text-gray-500 mt-0.5">Last 10 executions</p>
+          </div>
+          <a
+            href="/dashboard/trades"
+            className="flex items-center gap-1 text-xs text-brand-500 hover:text-brand-400 transition-colors font-medium"
+          >
+            View all
+            <ArrowUpRight className="w-3.5 h-3.5" />
           </a>
         </div>
         <TradeTable trades={recentTrades} compact />
