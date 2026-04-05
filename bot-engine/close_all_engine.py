@@ -39,6 +39,8 @@ from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
+from fee_calculator import calculate_net_pnl
+
 logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS        = 5
@@ -124,12 +126,19 @@ class CloseAllEngine:
         symbol     = trade["symbol"]
         side       = trade["side"]
         quantity   = float(trade["quantity"])
+        remaining_qty = float(trade.get("remaining_quantity") or quantity)
         market     = trade["market_type"]
         is_paper   = self.paper_modes.get(market, True)
+        fee_rate   = float(trade.get("fee_rate") or 0.001)
+        cumulative_net_pnl = float(trade.get("net_pnl") or trade.get("pnl") or 0)
+        entry_price = float(trade["entry_price"])
 
         close_side = "sell" if side.lower() == "buy" else "buy"
 
-        logger.info(f"[CloseAll] Closing {symbol} qty={quantity} side={close_side} paper={is_paper}")
+        logger.info(
+            f"[CloseAll] Closing {symbol} qty={remaining_qty:.8f} "
+            f"side={close_side} paper={is_paper}"
+        )
 
         # ── Paper mode: instant close ─────────────────────────────────────────
         if is_paper:
@@ -143,24 +152,37 @@ class CloseAllEngine:
                     except Exception:
                         pass
 
-                entry_price = float(trade["entry_price"])
-                if side.lower() == "sell":
-                    pnl = (entry_price - exit_price) * quantity
-                else:
-                    pnl = (exit_price - entry_price) * quantity
-
-                pnl_dec     = Decimal(str(pnl)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_UP)
-                pnl_pct_raw = (float(pnl_dec) / (entry_price * quantity)) * 100 if entry_price > 0 else 0
+                gross_pnl = (
+                    (entry_price - exit_price) * remaining_qty
+                    if side.lower() == "sell"
+                    else (exit_price - entry_price) * remaining_qty
+                )
+                net_pnl, fee_amount = calculate_net_pnl(
+                    gross_pnl, entry_price, exit_price, remaining_qty, fee_rate
+                )
+                total_net_pnl = cumulative_net_pnl + net_pnl
+                pnl_pct_raw = (
+                    (total_net_pnl / (entry_price * quantity)) * 100
+                    if entry_price > 0 and quantity > 0
+                    else 0
+                )
                 pnl_pct     = Decimal(str(pnl_pct_raw)).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
 
-                await self.db.close_paper_trade(trade_id, exit_price, float(pnl_dec), float(pnl_pct))
+                await self.db.close_paper_trade(
+                    trade_id,
+                    exit_price,
+                    net_pnl,
+                    float(pnl_pct),
+                    fee_amount=fee_amount,
+                    close_quantity=remaining_qty,
+                )
                 await self.db.log_close_attempt(
                     user_id=self.user_id,
                     trade_id=trade_id,
                     attempt=1,
                     status="filled",
-                    quantity_req=quantity,
-                    quantity_fill=quantity,
+                    quantity_req=remaining_qty,
+                    quantity_fill=remaining_qty,
                 )
                 return {"success": True, "error": None}
             except Exception as e:
@@ -174,8 +196,8 @@ class CloseAllEngine:
             logger.error(f"[CloseAll] {err}")
             return {"success": False, "error": err}
 
-        remaining_qty = quantity
         attempt       = 0
+        filled_value_total = 0.0
 
         while remaining_qty > 0 and attempt < MAX_ATTEMPTS:
             attempt += 1
@@ -202,8 +224,7 @@ class CloseAllEngine:
                 order    = await connector.place_order(symbol, close_side, remaining_qty)
                 order_id = order.get("id")
 
-                # F5 FIX: Pass connector so _confirm_fill can call fetch_order
-                filled_qty, status_str, error = await self._confirm_fill(
+                filled_qty, fill_price, status_str, error = await self._confirm_fill(
                     connector, symbol, order_id, remaining_qty
                 )
 
@@ -219,51 +240,68 @@ class CloseAllEngine:
                 )
                 await self.db.increment_close_attempts(trade_id)
 
-                if status_str == "filled":
-                    remaining_qty -= filled_qty
+                if status_str in ("filled", "partial") and filled_qty > 0:
+                    fill_price = fill_price or float(order.get("average") or order.get("price") or entry_price)
+                    fill_price = float(fill_price or entry_price)
+                    filled_value_total += filled_qty * fill_price
 
-                    if remaining_qty <= 0:
-                        try:
-                            ticker     = await connector.fetch_ticker(symbol)
-                            exit_price = float(ticker.get("last", 0))
-                        except Exception:
-                            exit_price = float(trade["entry_price"])
+                    gross_pnl = (
+                        (entry_price - fill_price) * filled_qty
+                        if side.lower() == "sell"
+                        else (fill_price - entry_price) * filled_qty
+                    )
+                    net_pnl, fee_amount = calculate_net_pnl(
+                        gross_pnl, entry_price, fill_price, filled_qty, fee_rate
+                    )
+                    cumulative_net_pnl += net_pnl
+                    remaining_qty = max(remaining_qty - filled_qty, 0.0)
+                    pnl_pct_raw = (
+                        (cumulative_net_pnl / (entry_price * quantity)) * 100
+                        if entry_price > 0 and quantity > 0
+                        else 0
+                    )
+                    pnl_pct = float(
+                        Decimal(str(pnl_pct_raw)).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+                    )
 
-                        entry_price = float(trade["entry_price"])
-                        orig_qty    = float(trade["quantity"])
-                        if side.lower() == "sell":
-                            pnl = (entry_price - exit_price) * orig_qty
-                        else:
-                            pnl = (exit_price - entry_price) * orig_qty
-
-                        pnl_dec     = Decimal(str(pnl)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_UP)
-                        pnl_pct_raw = (float(pnl_dec) / (entry_price * orig_qty)) * 100 if entry_price > 0 else 0
-                        pnl_pct     = Decimal(str(pnl_pct_raw)).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
-
-                        await self.db.close_live_trade(trade_id, exit_price, float(pnl_dec), float(pnl_pct), order_id or "")
-                        logger.info(f"[CloseAll] ✅ {symbol} fully closed @ {exit_price}")
+                    if remaining_qty <= 1e-8:
+                        avg_exit_price = filled_value_total / quantity if quantity > 0 else fill_price
+                        await self.db.close_live_trade(
+                            trade_id,
+                            avg_exit_price,
+                            net_pnl,
+                            pnl_pct,
+                            order_id or "",
+                            fee_amount=fee_amount,
+                            close_quantity=filled_qty,
+                        )
+                        logger.info(f"[CloseAll] ✅ {symbol} fully closed @ {avg_exit_price}")
                         return {"success": True, "error": None}
 
+                    await self.db.record_partial_close(
+                        user_id=self.user_id,
+                        trade_id=trade_id,
+                        exit_price=fill_price,
+                        filled_quantity=filled_qty,
+                        remaining_quantity=remaining_qty,
+                        partial_pnl=net_pnl,
+                        pnl_pct=pnl_pct,
+                        fee_amount=fee_amount,
+                        order_id=order_id or "",
+                    )
                     logger.warning(
                         f"[CloseAll] ⚠️  {symbol} partial fill: "
                         f"filled={filled_qty:.8f} remaining={remaining_qty:.8f}"
                     )
-                    await asyncio.sleep(1.5)
-
-                elif status_str == "partial":
-                    remaining_qty -= filled_qty
                     await asyncio.sleep(_backoff(attempt))
 
                 elif status_str == "cancelled" or status_str == "rejected":
-                    # F5 FIX: Order was explicitly cancelled/rejected by exchange
-                    # Do NOT decrement remaining_qty. Retry with full remaining qty.
                     logger.warning(
                         f"[CloseAll] ⚠️  {symbol} order {status_str} by exchange. Retrying."
                     )
                     await asyncio.sleep(_backoff(attempt))
 
                 else:
-                    # failed / unconfirmed
                     await asyncio.sleep(_backoff(attempt))
 
             except Exception as e:
@@ -322,14 +360,11 @@ class CloseAllEngine:
         or 'rejected' for those specific terminal states. Return 'partial'
         if partially filled.
 
-        Falls back to expected_qty assumption ONLY if fetch_order fails
-        (exchange API error during confirmation), with a warning log.
-
-        Returns: (filled_qty, status_str, error_msg)
+        Returns: (filled_qty, avg_fill_price, status_str, error_msg)
         status_str: 'filled' | 'partial' | 'cancelled' | 'rejected' | 'failed'
         """
         if not order_id:
-            return 0.0, "failed", "No order ID returned"
+            return 0.0, 0.0, "failed", "No order ID returned"
 
         for poll in range(FILL_CONFIRM_MAX):
             await asyncio.sleep(FILL_CONFIRM_POLL)
@@ -350,13 +385,14 @@ class CloseAllEngine:
                     order_info  = await connector.fetch_order(order_id, symbol)
                     exch_status = str(order_info.get("status", "unknown")).lower()
                     filled_qty  = float(order_info.get("filled", 0) or 0)
+                    avg_price   = float(order_info.get("average") or order_info.get("price") or 0)
 
                     if exch_status in ("closed", "filled"):
                         logger.info(
                             f"[CloseAll] Order {order_id} confirmed filled: "
                             f"qty={filled_qty:.8f}"
                         )
-                        return filled_qty, "filled", None
+                        return filled_qty, avg_price, "filled", None
 
                     elif exch_status in ("canceled", "cancelled"):
                         logger.warning(
@@ -364,31 +400,26 @@ class CloseAllEngine:
                             f"filled_qty={filled_qty:.8f}"
                         )
                         if filled_qty > 0:
-                            # Partial fill before cancel
-                            return filled_qty, "partial", f"Order cancelled after partial fill: {filled_qty:.8f}"
-                        return 0.0, "cancelled", "Order cancelled by exchange — will retry"
+                            return filled_qty, avg_price, "partial", f"Order cancelled after partial fill: {filled_qty:.8f}"
+                        return 0.0, avg_price, "cancelled", "Order cancelled by exchange — will retry"
 
                     elif exch_status in ("rejected", "expired"):
                         logger.warning(f"[CloseAll] Order {order_id} was {exch_status} by exchange.")
-                        return 0.0, "rejected", f"Order {exch_status} by exchange — will retry"
+                        return 0.0, avg_price, "rejected", f"Order {exch_status} by exchange — will retry"
 
                     else:
-                        # Unknown status — be conservative, treat as partial to retry
                         logger.warning(
                             f"[CloseAll] Order {order_id} has unknown status '{exch_status}' "
                             f"after leaving open_orders. Treating as partial to trigger retry."
                         )
-                        return filled_qty, "partial", f"Unknown order status: {exch_status}"
+                        return filled_qty, avg_price, "partial", f"Unknown order status: {exch_status}"
 
                 except Exception as fetch_err:
-                    # fetch_order failed — we can't confirm fill status.
-                    # WARNING: We fall back to assuming filled to unblock close_all.
-                    # This is the lesser evil vs leaving the loop stuck indefinitely.
                     logger.warning(
                         f"[CloseAll] fetch_order failed for {order_id}: {fetch_err}. "
-                        f"Assuming filled={expected_qty:.8f} (fallback — verify manually)."
+                        "Treating as failed confirmation and retrying."
                     )
-                    return expected_qty, "filled", f"fill assumed (fetch_order failed: {fetch_err})"
+                    return 0.0, 0.0, "failed", f"fill unconfirmed (fetch_order failed: {fetch_err})"
 
             except Exception as poll_err:
                 logger.warning(f"[CloseAll] Fill confirmation poll failed: {poll_err}")
@@ -399,7 +430,7 @@ class CloseAllEngine:
             f"[CloseAll] Order {order_id} fill unconfirmed after "
             f"{FILL_CONFIRM_MAX} polls — treating as partial"
         )
-        return 0.0, "partial", "Fill unconfirmed after max polls"
+        return 0.0, 0.0, "failed", "Fill unconfirmed after max polls"
 
     async def _notify_complete(self):
         """

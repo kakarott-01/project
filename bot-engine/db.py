@@ -20,6 +20,7 @@ import json
 import logging
 import base64
 import hashlib
+from pathlib import Path
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, Dict, List, Any
 from datetime import datetime, date
@@ -30,6 +31,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
+
+PENDING_LIVE_TRADE_SPOOL = os.getenv(
+    "PENDING_LIVE_TRADE_SPOOL",
+    "/tmp/upbot-pending-live-trades.jsonl",
+)
 
 
 # ── Key derivation ────────────────────────────────────────────────────────────
@@ -118,6 +124,7 @@ class Database:
         if not self._url:
             raise RuntimeError("DATABASE_URL not set")
         self._pool: Optional[asyncpg.Pool] = None
+        self._spool_path = Path(PENDING_LIVE_TRADE_SPOOL)
 
     async def pool(self) -> asyncpg.Pool:
         if not self._pool:
@@ -131,6 +138,9 @@ class Database:
             await self._pool.close()
             self._pool = None
             logger.info("🔌 DB pool closed")
+
+    def _ensure_spool_parent(self):
+        self._spool_path.parent.mkdir(parents=True, exist_ok=True)
 
     # ── Startup cleanup ───────────────────────────────────────────────────────
 
@@ -217,6 +227,16 @@ class Database:
         row  = await pool.fetchrow("SELECT * FROM risk_settings WHERE user_id=$1", user_id)
         return dict(row) if row else {}
 
+    async def get_paper_balance(self, user_id: str) -> float:
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            "SELECT paper_balance FROM risk_settings WHERE user_id=$1",
+            user_id,
+        )
+        if row and row["paper_balance"] is not None:
+            return float(row["paper_balance"])
+        return 10_000.0
+
     # ── Watchdog restart counter ──────────────────────────────────────────────
 
     async def get_watchdog_restart_count(self, user_id: str) -> int:
@@ -288,6 +308,84 @@ class Database:
                 "MANUAL EXCHANGE CHECK REQUIRED."
             )
 
+    async def spool_live_trade(self, payload: Dict[str, Any]):
+        self._ensure_spool_parent()
+        line = json.dumps(payload, separators=(",", ":"))
+        with self._spool_path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        logger.critical(
+            f"💾 Live trade spooled locally for recovery: "
+            f"{payload.get('symbol')} order={payload.get('order_id')}"
+        )
+
+    async def flush_spooled_live_trades(
+        self,
+        user_id: Optional[str] = None,
+        market_type: Optional[str] = None,
+    ) -> Dict[str, int]:
+        if not self._spool_path.exists():
+            return {"restored": 0, "remaining": 0}
+
+        restored = 0
+        retained: List[str] = []
+
+        with self._spool_path.open("r", encoding="utf-8") as fh:
+            lines = [line.strip() for line in fh.readlines() if line.strip()]
+
+        for line in lines:
+            try:
+                payload = json.loads(line)
+            except Exception:
+                retained.append(line)
+                continue
+
+            if user_id and payload.get("user_id") != user_id:
+                retained.append(line)
+                continue
+            if market_type and payload.get("market_type") != market_type:
+                retained.append(line)
+                continue
+
+            try:
+                trade_id = await self.save_live_trade(
+                    user_id=payload["user_id"],
+                    symbol=payload["symbol"],
+                    side=payload["side"],
+                    quantity=float(payload["requested_quantity"]),
+                    price=float(payload["entry_price"]),
+                    stop_loss=float(payload["stop_loss"]),
+                    take_profit=float(payload["take_profit"]),
+                    order_id=payload["order_id"],
+                    algo_name=payload["algo_name"],
+                    market_type=payload["market_type"],
+                    session_ref=payload.get("session_ref", "") or "",
+                    actual_quantity=float(payload["actual_quantity"]),
+                    exchange_name=payload.get("exchange_name", "live"),
+                    fee_rate=float(payload.get("fee_rate", 0.001)),
+                )
+                if trade_id:
+                    restored += 1
+                    logger.info(
+                        f"♻️  Restored spooled live trade {payload['symbol']} "
+                        f"order={payload['order_id']}"
+                    )
+                else:
+                    logger.warning(
+                        f"♻️  Spool replay skipped duplicate open trade for "
+                        f"{payload['symbol']} order={payload['order_id']}"
+                    )
+            except Exception as e:
+                payload["retry_count"] = int(payload.get("retry_count", 0)) + 1
+                payload["last_error"] = str(e)[:300]
+                retained.append(json.dumps(payload, separators=(",", ":")))
+
+        self._ensure_spool_parent()
+        with self._spool_path.open("w", encoding="utf-8") as fh:
+            for line in retained:
+                fh.write(line + "\n")
+
+        return {"restored": restored, "remaining": len(retained)}
+
     # ── Signal storage ────────────────────────────────────────────────────────
 
     async def save_signal(
@@ -321,18 +419,20 @@ class Database:
         algo_name: str,
         market_type: str,
         session_ref: str = "",
+        fee_rate: float = 0.001,
     ) -> Optional[str]:
         pool = await self.pool()
         row = await pool.fetchrow(
             """INSERT INTO trades
                (user_id, exchange_name, market_type, symbol, side, quantity,
-                entry_price, status, algo_used, is_paper, bot_session_ref, opened_at)
-               VALUES ($1,'paper',$2,$3,$4,$5,$6,'open',$7,true,$8,$9)
+                entry_price, fee_rate, filled_quantity, remaining_quantity,
+                status, algo_used, is_paper, bot_session_ref, opened_at)
+               VALUES ($1,'paper',$2,$3,$4,$5,$6,$7,0,$5,'open',$8,true,$9,$10)
                ON CONFLICT ON CONSTRAINT idx_trades_one_open_per_symbol DO NOTHING
                RETURNING id""",
             user_id, market_type, symbol,
             side.lower(), str(quantity), str(price),
-            algo_name, session_ref or None,
+            str(fee_rate), algo_name, session_ref or None,
             datetime.utcnow(),
         )
         if row:
@@ -357,6 +457,8 @@ class Database:
         session_ref: str = "",
         # F9: actual quantity filled by the exchange (may differ from requested)
         actual_quantity: Optional[float] = None,
+        exchange_name: str = "live",
+        fee_rate: float = 0.001,
     ) -> Optional[str]:
         # F9: Use actual filled quantity if provided, fall back to requested quantity
         recorded_quantity = actual_quantity if actual_quantity is not None else quantity
@@ -371,14 +473,15 @@ class Database:
         row = await pool.fetchrow(
             """INSERT INTO trades
                (user_id, exchange_name, market_type, symbol, side, quantity,
-                entry_price, stop_loss, take_profit, status, algo_used,
+                entry_price, stop_loss, take_profit, fee_rate,
+                filled_quantity, remaining_quantity, status, algo_used,
                 is_paper, exchange_order_id, bot_session_ref, opened_at)
-               VALUES ($1,'live',$2,$3,$4,$5,$6,$7,$8,'open',$9,false,$10,$11,$12)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0,$6,'open',$11,false,$12,$13,$14)
                ON CONFLICT ON CONSTRAINT idx_trades_one_open_per_symbol DO NOTHING
                RETURNING id""",
-            user_id, market_type, symbol,
+            user_id, exchange_name, market_type, symbol,
             side.lower(), str(recorded_quantity), str(price),
-            str(stop_loss), str(take_profit),
+            str(stop_loss), str(take_profit), str(fee_rate),
             algo_name, order_id,
             session_ref or None,
             datetime.utcnow(),
@@ -395,7 +498,9 @@ class Database:
     async def get_open_trade(self, user_id: str, symbol: str, market_type: str) -> Optional[Dict[str, Any]]:
         pool = await self.pool()
         row = await pool.fetchrow(
-            """SELECT id, side, quantity, entry_price, opened_at
+            """SELECT id, side, quantity, entry_price, opened_at,
+                      fee_rate, fee_amount, pnl, net_pnl,
+                      filled_quantity, remaining_quantity
                FROM trades
                WHERE user_id=$1 AND symbol=$2 AND market_type=$3 AND status='open'
                ORDER BY opened_at DESC LIMIT 1""",
@@ -407,7 +512,8 @@ class Database:
         pool = await self.pool()
         rows = await pool.fetch(
             """SELECT id, symbol, side, quantity, entry_price,
-                      market_type, is_paper, bot_session_ref, opened_at
+                      market_type, is_paper, bot_session_ref, opened_at,
+                      fee_rate, pnl, net_pnl, filled_quantity, remaining_quantity
                FROM trades
                WHERE user_id=$1 AND market_type=$2 AND status='open'
                ORDER BY opened_at ASC""",
@@ -419,7 +525,8 @@ class Database:
         pool = await self.pool()
         rows = await pool.fetch(
             """SELECT id, symbol, side, quantity, entry_price,
-                      market_type, is_paper, bot_session_ref, opened_at
+                      market_type, is_paper, bot_session_ref, opened_at,
+                      fee_rate, pnl, net_pnl, filled_quantity, remaining_quantity
                FROM trades WHERE user_id=$1 AND status='open' ORDER BY opened_at ASC""",
             user_id,
         )
@@ -462,34 +569,128 @@ class Database:
 
     # ── Trade: CLOSE ──────────────────────────────────────────────────────────
 
-    async def close_paper_trade(self, trade_id: str, exit_price: float, pnl: float, pnl_pct: float) -> bool:
+    async def close_paper_trade(
+        self,
+        trade_id: str,
+        exit_price: float,
+        pnl: float,
+        pnl_pct: float,
+        fee_amount: float = 0.0,
+        close_quantity: Optional[float] = None,
+    ) -> bool:
         pool   = await self.pool()
         result = await pool.execute(
-            """UPDATE trades SET status='closed', exit_price=$2, pnl=$3, pnl_pct=$4, closed_at=$5
+            """UPDATE trades
+               SET status='closed',
+                   exit_price=$2,
+                   pnl=COALESCE(pnl, 0) + $3,
+                   net_pnl=COALESCE(net_pnl, 0) + $3,
+                   pnl_pct=$4,
+                   fee_amount=COALESCE(fee_amount, 0) + $5,
+                   filled_quantity=COALESCE(filled_quantity, 0) + $6,
+                   remaining_quantity=0,
+                   closed_at=$7
                WHERE id=$1 AND status='open'""",
-            trade_id, str(exit_price), _round_pnl(pnl), _round_pct(pnl_pct), datetime.utcnow(),
+            trade_id, str(exit_price), _round_pnl(pnl), _round_pct(pnl_pct),
+            _round_pnl(fee_amount), str(close_quantity or 0), datetime.utcnow(),
         )
         rows_affected = int(result.split()[-1])
         if rows_affected == 0:
             logger.warning(f"⚠️  close_paper_trade: trade {trade_id} already closed. Double-close prevented.")
             return False
-        logger.info(f"📝 Paper trade closed id={trade_id} exit={exit_price} PnL={pnl:+.4f}")
+        logger.info(
+            f"📝 Paper trade closed id={trade_id} exit={exit_price} "
+            f"net_PnL={pnl:+.4f} fees={fee_amount:.4f}"
+        )
         return True
 
     async def close_live_trade(
-        self, trade_id: str, exit_price: float, pnl: float, pnl_pct: float, close_order_id: str = ""
+        self,
+        trade_id: str,
+        exit_price: float,
+        pnl: float,
+        pnl_pct: float,
+        close_order_id: str = "",
+        fee_amount: float = 0.0,
+        close_quantity: Optional[float] = None,
     ) -> bool:
         pool   = await self.pool()
         result = await pool.execute(
-            """UPDATE trades SET status='closed', exit_price=$2, pnl=$3, pnl_pct=$4, closed_at=$5
+            """UPDATE trades
+               SET status='closed',
+                   exit_price=$2,
+                   pnl=COALESCE(pnl, 0) + $3,
+                   net_pnl=COALESCE(net_pnl, 0) + $3,
+                   pnl_pct=$4,
+                   fee_amount=COALESCE(fee_amount, 0) + $5,
+                   filled_quantity=COALESCE(filled_quantity, 0) + $6,
+                   remaining_quantity=0,
+                   exchange_order_id=COALESCE(NULLIF($7, ''), exchange_order_id),
+                   closed_at=$8
                WHERE id=$1 AND status='open'""",
-            trade_id, str(exit_price), _round_pnl(pnl), _round_pct(pnl_pct), datetime.utcnow(),
+            trade_id, str(exit_price), _round_pnl(pnl), _round_pct(pnl_pct),
+            _round_pnl(fee_amount), str(close_quantity or 0), close_order_id,
+            datetime.utcnow(),
         )
         rows_affected = int(result.split()[-1])
         if rows_affected == 0:
             logger.warning(f"⚠️  close_live_trade: trade {trade_id} already closed. Double-close prevented.")
             return False
-        logger.info(f"📝 Live trade closed id={trade_id} exit={exit_price} PnL={pnl:+.4f}")
+        logger.info(
+            f"📝 Live trade closed id={trade_id} exit={exit_price} "
+            f"net_PnL={pnl:+.4f} fees={fee_amount:.4f}"
+        )
+        return True
+
+    async def record_partial_close(
+        self,
+        user_id: str,
+        trade_id: str,
+        exit_price: float,
+        filled_quantity: float,
+        remaining_quantity: float,
+        partial_pnl: float,
+        pnl_pct: float,
+        fee_amount: float,
+        order_id: str,
+    ) -> bool:
+        pool = await self.pool()
+        result = await pool.execute(
+            """UPDATE trades
+               SET filled_quantity=COALESCE(filled_quantity, 0) + $2,
+                   remaining_quantity=$3,
+                   pnl=COALESCE(pnl, 0) + $4,
+                   net_pnl=COALESCE(net_pnl, 0) + $4,
+                   pnl_pct=$5,
+                   fee_amount=COALESCE(fee_amount, 0) + $6,
+                   exit_price=$7,
+                   exchange_order_id=COALESCE(NULLIF($8, ''), exchange_order_id)
+               WHERE id=$1 AND status='open'""",
+            trade_id,
+            str(filled_quantity),
+            str(remaining_quantity),
+            _round_pnl(partial_pnl),
+            _round_pct(pnl_pct),
+            _round_pnl(fee_amount),
+            str(exit_price),
+            order_id,
+        )
+        rows_affected = int(result.split()[-1])
+        if rows_affected == 0:
+            return False
+        await self.log_close_attempt(
+            user_id=user_id,
+            trade_id=trade_id,
+            attempt=1,
+            status="partial",
+            quantity_req=filled_quantity + remaining_quantity,
+            quantity_fill=filled_quantity,
+            exchange_order_id=order_id,
+        )
+        logger.info(
+            f"📝 Partial close trade={trade_id} fill={filled_quantity:.8f} "
+            f"remaining={remaining_quantity:.8f} net_PnL={partial_pnl:+.4f}"
+        )
         return True
 
     # ── Trade: CLOSE TRACKING ─────────────────────────────────────────────────
@@ -624,6 +825,14 @@ class Database:
         await pool.execute(
             "UPDATE bot_statuses SET last_heartbeat=NOW(), updated_at=NOW() WHERE user_id=$1", user_id,
         )
+
+    async def get_bot_status(self, user_id: str) -> Optional[str]:
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            "SELECT status FROM bot_statuses WHERE user_id=$1",
+            user_id,
+        )
+        return row["status"] if row else None
 
     async def get_bot_stop_mode(self, user_id: str) -> Optional[str]:
         pool = await self.pool()

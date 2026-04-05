@@ -146,6 +146,7 @@ export const riskSettings = pgTable('risk_settings', {
   maxOpenTrades:    integer('max_open_trades').default(3).notNull(),
   cooldownSeconds:  integer('cooldown_seconds').default(300).notNull(),
   trailingStop:     boolean('trailing_stop').default(false).notNull(),
+  paperBalance:     decimal('paper_balance', { precision: 20, scale: 2 }).default('10000.00').notNull(),
   updatedAt:        timestamp('updated_at').defaultNow().notNull(),
 })
 
@@ -165,6 +166,11 @@ export const trades = pgTable('trades', {
   takeProfit:      decimal('take_profit',{ precision: 20, scale: 8 }),
   pnl:             decimal('pnl',        { precision: 20, scale: 8 }),
   pnlPct:          decimal('pnl_pct',    { precision: 8,  scale: 4 }),
+  feeRate:         decimal('fee_rate',   { precision: 8,  scale: 6 }).default('0.001'),
+  feeAmount:       decimal('fee_amount', { precision: 20, scale: 8 }),
+  netPnl:          decimal('net_pnl',    { precision: 20, scale: 8 }),
+  filledQuantity:  decimal('filled_quantity', { precision: 20, scale: 8 }).default('0'),
+  remainingQuantity: decimal('remaining_quantity', { precision: 20, scale: 8 }),
   status:          tradeStatusEnum('status').default('pending').notNull(),
   algoUsed:        varchar('algo_used', { length: 100 }),
   signalId:        uuid('signal_id'),

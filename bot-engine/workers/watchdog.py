@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 HEARTBEAT_TIMEOUT_SECONDS = 180   # restart bot if no heartbeat for 3 minutes
 WATCHDOG_INTERVAL_SECONDS =  60   # check every 60 seconds
 MAX_RESTARTS              =   3   # give up after this many consecutive restart attempts
+HEALTHY_SUSTAIN_SECONDS   = 300   # require 5 minutes of healthy runtime before reset
 
 
 class Watchdog:
@@ -104,11 +105,13 @@ class Watchdog:
                     continue
 
             elif (now - ctx.last_heartbeat) < timeout:
-                # Heartbeat is fresh — reset restart counter
-                await self._reset_restart_count(user_id)
+                healthy_for = (now - ctx.started_at).total_seconds()
+                if healthy_for >= HEALTHY_SUSTAIN_SECONDS:
+                    await self._reset_restart_count(user_id)
                 logger.debug(
                     f"🐕 {user_id[:8]}… heartbeat OK "
-                    f"({int((now - ctx.last_heartbeat).total_seconds())}s ago)"
+                    f"({int((now - ctx.last_heartbeat).total_seconds())}s ago, "
+                    f"healthy_for={int(healthy_for)}s)"
                 )
                 continue
 

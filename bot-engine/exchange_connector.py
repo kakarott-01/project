@@ -39,7 +39,13 @@ SPOT_MARKETS    = {"indian"}
 
 # ── OHLCV cache ───────────────────────────────────────────────────────────────
 _ohlcv_cache: Dict[Tuple[str, str, str], Tuple[float, pd.DataFrame]] = {}
-OHLCV_CACHE_TTL   = 30
+OHLCV_CACHE_TTL_BY_MARKET = {
+    "indian": 55,
+    "crypto": 110,
+    "commodities": 80,
+    "global": 110,
+}
+OHLCV_CACHE_TTL_DEFAULT = 55
 MAX_CACHE_ENTRIES = 200
 
 
@@ -48,11 +54,12 @@ def _cache_key(exchange_name: str, symbol: str, timeframe: str) -> Tuple[str, st
 
 
 def _get_cached_ohlcv(
-    exchange_name: str, symbol: str, timeframe: str
+    exchange_name: str, symbol: str, timeframe: str, market_type: str
 ) -> Optional[pd.DataFrame]:
     key   = _cache_key(exchange_name, symbol, timeframe)
     entry = _ohlcv_cache.get(key)
-    if entry and (time.time() - entry[0]) < OHLCV_CACHE_TTL:
+    ttl = OHLCV_CACHE_TTL_BY_MARKET.get(market_type, OHLCV_CACHE_TTL_DEFAULT)
+    if entry and (time.time() - entry[0]) < ttl:
         logger.debug(f"🎯 OHLCV cache HIT  {symbol} {timeframe}")
         return entry[1]
     return None
@@ -63,10 +70,11 @@ def _set_cached_ohlcv(
 ) -> None:
     key = _cache_key(exchange_name, symbol, timeframe)
     now = time.time()
+    ttl = OHLCV_CACHE_TTL_BY_MARKET.get("crypto", OHLCV_CACHE_TTL_DEFAULT)
     if len(_ohlcv_cache) >= MAX_CACHE_ENTRIES:
         stale_keys = [
             k for k, (ts, _) in _ohlcv_cache.items()
-            if now - ts > OHLCV_CACHE_TTL
+            if now - ts > ttl
         ]
         for k in stale_keys:
             del _ohlcv_cache[k]
@@ -164,7 +172,7 @@ class ExchangeConnector:
         timeframe: str = "15m",
         limit: int = 100,
     ) -> pd.DataFrame:
-        cached = _get_cached_ohlcv(self.exchange_name, symbol, timeframe)
+        cached = _get_cached_ohlcv(self.exchange_name, symbol, timeframe, self.market_type)
         if cached is not None:
             return cached
         logger.debug(f"⬇️  OHLCV cache MISS {symbol} {timeframe} — fetching")
@@ -192,7 +200,7 @@ class ExchangeConnector:
                 raise
 
     async def fetch_latest_close(self, symbol: str, timeframe: str = "1m") -> Optional[float]:
-        cached = _get_cached_ohlcv(self.exchange_name, symbol, timeframe)
+        cached = _get_cached_ohlcv(self.exchange_name, symbol, timeframe, self.market_type)
         if cached is not None and not cached.empty:
             price = float(cached["close"].iloc[-1])
             logger.debug(f"💲 Using cached close for {symbol}: {price}")
@@ -256,6 +264,28 @@ class ExchangeConnector:
                 return await ex.fetch_open_orders(symbol)
             except Exception as e:
                 logger.error(f"❌ Fetch open orders failed: {e}", exc_info=True)
+                return []
+
+    async def fetch_positions(self, symbol: Optional[str] = None) -> List[Dict]:
+        async with self._exchange() as ex:
+            try:
+                if not ex.has.get("fetchPositions"):
+                    return []
+                positions = await ex.fetch_positions([symbol] if symbol else None)
+                open_positions = []
+                for position in positions:
+                    contracts = position.get("contracts")
+                    size = position.get("size")
+                    amount = position.get("amount")
+                    qty = contracts if contracts is not None else size if size is not None else amount
+                    try:
+                        if abs(float(qty or 0)) > 0:
+                            open_positions.append(position)
+                    except Exception:
+                        continue
+                return open_positions
+            except Exception as e:
+                logger.warning(f"⚠️  fetch_positions failed: {e}")
                 return []
 
     async def cancel_order(self, order_id: str, symbol: str) -> Dict:

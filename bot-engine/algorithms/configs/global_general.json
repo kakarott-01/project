@@ -3,6 +3,7 @@
   "enabled": true,
   "paper_mode": true,
   "quote_currency": "USDT",
+  "fee_rate": 0.001,
   "symbols": ["BTC/USDT", "ETH/USDT"],
   "timeframe": "1h",
   "stop_loss_pct": 2.0,

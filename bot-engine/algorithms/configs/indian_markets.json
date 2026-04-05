@@ -3,6 +3,7 @@
   "enabled": true,
   "paper_mode": true,
   "quote_currency": "INR",
+  "fee_rate": 0.0003,
   "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"],
   "timeframe": "5m",
   "stop_loss_pct": 0.8,

@@ -13,6 +13,7 @@ const schema = z.object({
   maxOpenTrades: z.number().int().min(1).max(20),
   cooldownSeconds: z.number().int().min(0).max(86400),
   trailingStop: z.boolean(),
+  paperBalance: z.number().min(100).max(10_000_000).optional().default(10000),
 })
 
 export async function GET(req: NextRequest) {
@@ -56,6 +57,7 @@ export async function POST(req: NextRequest) {
       maxOpenTrades: d.maxOpenTrades,
       cooldownSeconds: d.cooldownSeconds,
       trailingStop: d.trailingStop,
+      paperBalance: String(d.paperBalance ?? 10000),
     })
     .onConflictDoUpdate({
       target: riskSettings.userId,
@@ -67,6 +69,7 @@ export async function POST(req: NextRequest) {
         maxOpenTrades: d.maxOpenTrades,
         cooldownSeconds: d.cooldownSeconds,
         trailingStop: d.trailingStop,
+        paperBalance: String(d.paperBalance ?? 10000),
         updatedAt: new Date(),
       },
     })

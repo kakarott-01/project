@@ -45,6 +45,7 @@ from typing import Optional, Dict, List, Tuple
 from datetime import datetime, timedelta
 
 from exchange_connector import ExchangeConnector
+from fee_calculator import calculate_net_pnl
 from risk_manager import RiskManager
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,11 @@ def _load_config_cached(config_path: str) -> Optional[Dict]:
 # a position on the exchange would leave the risk manager thinking the
 # position is still open for up to 10 minutes, blocking new trades.
 RECONCILE_INTERVAL_SEC = 2 * 60   # 2 minutes (was 10 * 60)
+FUTURES_MARKETS = {"crypto", "commodities", "global"}
+
+
+class TradePersistenceError(RuntimeError):
+    pass
 
 
 class BaseAlgo(ABC):
@@ -160,8 +166,20 @@ class BaseAlgo(ABC):
                 self._reconciled = True
                 return
             try:
-                exchange_orders  = await self.connector.fetch_open_orders()
-                exchange_symbols = {o.get("symbol", "") for o in exchange_orders}
+                exchange_symbols = set()
+                if self.market_type in FUTURES_MARKETS:
+                    exchange_positions = await self.connector.fetch_positions()
+                    exchange_symbols |= {
+                        p.get("symbol", "")
+                        for p in exchange_positions
+                        if p.get("symbol")
+                    }
+                exchange_orders = await self.connector.fetch_open_orders()
+                exchange_symbols |= {
+                    o.get("symbol", "")
+                    for o in exchange_orders
+                    if o.get("symbol")
+                }
             except Exception as e:
                 logger.warning(f"[{self.name}] ⚠️  Exchange order fetch failed during reconcile: {e}. Skipping.")
                 self._reconciled = True
@@ -196,10 +214,22 @@ class BaseAlgo(ABC):
                 await self.db.update_reconciliation_log(self.user_id, self.market_type, 0)
                 return
             try:
-                exchange_orders  = await self.connector.fetch_open_orders()
-                exchange_symbols = {o.get("symbol", "") for o in exchange_orders}
+                exchange_symbols = set()
+                if self.market_type in FUTURES_MARKETS:
+                    exchange_positions = await self.connector.fetch_positions()
+                    exchange_symbols |= {
+                        p.get("symbol", "")
+                        for p in exchange_positions
+                        if p.get("symbol")
+                    }
+                exchange_orders = await self.connector.fetch_open_orders()
+                exchange_symbols |= {
+                    o.get("symbol", "")
+                    for o in exchange_orders
+                    if o.get("symbol")
+                }
             except Exception as e:
-                logger.warning(f"[{self.name}] ⚠️  Exchange fetch_open_orders failed: {e}. Skipping.")
+                logger.warning(f"[{self.name}] ⚠️  Exchange reconciliation fetch failed: {e}. Skipping.")
                 return
             fixed = 0
             for symbol, trade_id in db_open_map.items():
@@ -229,6 +259,11 @@ class BaseAlgo(ABC):
                 pass
 
     async def _run_cycle_inner(self):
+        bot_status = await self.db.get_bot_status(self.user_id)
+        if bot_status == "error":
+            logger.warning(f"[{self.name}] Bot status is error — skipping cycle")
+            return
+
         if not self._reconciled:
             await self._reconcile_positions()
         if not self._risk_loaded:
@@ -256,8 +291,17 @@ class BaseAlgo(ABC):
         )
 
         if self._paper_mode:
-            balance = 10_000.0
+            balance = await self.db.get_paper_balance(self.user_id)
         else:
+            try:
+                replay = await self.db.flush_spooled_live_trades(self.user_id, self.market_type)
+                if replay["restored"] or replay["remaining"]:
+                    logger.info(
+                        f"[{self.name}] ♻️  spooled live trade replay "
+                        f"restored={replay['restored']} remaining={replay['remaining']}"
+                    )
+            except Exception as e:
+                logger.warning(f"[{self.name}] ⚠️  Could not replay spooled trades: {e}")
             balance = await self.connector.get_balance(self.config.get("quote_currency", "USDT"))
 
         if balance <= 0:
@@ -312,6 +356,7 @@ class BaseAlgo(ABC):
                     self.user_id, symbol, signal, quantity,
                     price, self.name, self.market_type,
                     session_ref=self._session_ref,
+                    fee_rate=float(self.config.get("fee_rate", 0.001)),
                 )
                 if trade_id:
                     if hasattr(self, "_confirm_staged_open"):
@@ -341,97 +386,160 @@ class BaseAlgo(ABC):
         self, symbol: str, exit_signal: str, trade_id: str,
         entry_price: float, original_side: str, balance: float,
     ):
-        """
-        F3 FIX: _open_positions is always cleaned up, regardless of whether
-        the DB close succeeds. This prevents infinite exit-retry loops.
-
-        Previous bug: if closed=False (trade already closed by another process
-        or concurrent call), the symbol stayed in _open_positions. Next cycle
-        would detect the position, call _check_exit, fetch ticker, attempt
-        close again → returned False again → infinite loop until restart.
-
-        Fix: Always pop _open_positions at the point we know the trade should
-        be closed. The DB WHERE status='open' guard prevents actual double-closes.
-        """
-        # F3 FIX: Pop _open_positions FIRST, before any async operations.
-        # If anything after this raises, the in-memory state is still correct.
         if hasattr(self, "_open_positions"):
             self._open_positions.pop(symbol, None)
 
         try:
-            ticker     = await self.connector.fetch_ticker(symbol)
-            exit_price = ticker.get("last")
-            if not exit_price:
-                logger.warning(f"[{self.name}] ❌ No price to close {symbol}")
-                return
-
-            # Verify the trade is still open in DB before attempting close
-            # (guards against race with close_all_engine or another cycle)
             open_row = await self.db.get_open_trade(self.user_id, symbol, self.market_type)
             if not open_row:
-                # Already closed by another process — _open_positions already cleaned up above
                 logger.info(f"[{self.name}] ℹ️  {symbol} already closed in DB, skipping close")
                 return
 
-            quantity = float(open_row["quantity"])
-            if original_side.lower() == "sell":
-                pnl = (entry_price - exit_price) * quantity
-            else:
-                pnl = (exit_price - entry_price) * quantity
-            pnl_pct = (pnl / (entry_price * quantity)) * 100 if entry_price > 0 else 0
+            total_quantity = float(open_row["quantity"])
+            remaining_quantity = float(open_row.get("remaining_quantity") or total_quantity)
+            cumulative_net_pnl = float(open_row.get("net_pnl") or open_row.get("pnl") or 0)
+            fee_rate = float(open_row.get("fee_rate") or self.config.get("fee_rate", 0.001))
 
             if self._paper_mode:
-                closed = await self.db.close_paper_trade(trade_id, exit_price, pnl, pnl_pct)
-                # F3 FIX: No position cleanup here — already done above.
-                # closed=False means another process closed it — that's fine.
+                ticker = await self.connector.fetch_ticker(symbol)
+                exit_price = float(ticker.get("last") or 0)
+                if not exit_price:
+                    logger.warning(f"[{self.name}] ❌ No price to close {symbol}")
+                    return
+
+                gross_pnl = (
+                    (entry_price - exit_price) * remaining_quantity
+                    if original_side.lower() == "sell"
+                    else (exit_price - entry_price) * remaining_quantity
+                )
+                net_pnl, fee_amount = calculate_net_pnl(
+                    gross_pnl, entry_price, exit_price, remaining_quantity, fee_rate
+                )
+                total_net_pnl = cumulative_net_pnl + net_pnl
+                pnl_pct = (
+                    (total_net_pnl / (entry_price * total_quantity)) * 100
+                    if entry_price > 0 and total_quantity > 0
+                    else 0
+                )
+                closed = await self.db.close_paper_trade(
+                    trade_id,
+                    exit_price,
+                    net_pnl,
+                    pnl_pct,
+                    fee_amount=fee_amount,
+                    close_quantity=remaining_quantity,
+                )
                 if not closed:
                     logger.info(f"[{self.name}] ℹ️  {symbol} close was a no-op (already closed by another process)")
                     return
                 logger.info(
-                    f"[{self.name}] 🧪 PAPER CLOSE {symbol} entry={entry_price} exit={exit_price} PnL={pnl:+.4f}"
+                    f"[{self.name}] 🧪 PAPER CLOSE {symbol} entry={entry_price} "
+                    f"exit={exit_price} net_PnL={net_pnl:+.4f}"
                 )
+                final_pnl = total_net_pnl
             else:
-                order  = await self.connector.place_order(symbol, exit_signal, quantity)
-                closed = await self.db.close_live_trade(trade_id, exit_price, pnl, pnl_pct, order.get("id", ""))
+                order = await self.connector.place_order(symbol, exit_signal, remaining_quantity)
+                order_id = order.get("id", "")
+                filled_qty, exit_price, fill_status = await self._fetch_fill_details(
+                    order_id, symbol, remaining_quantity, float(order.get("average") or order.get("price") or 0)
+                )
+
+                if filled_qty <= 0:
+                    logger.error(
+                        f"[{self.name}] ❌ Exit order {order_id} for {symbol} not filled "
+                        f"(status={fill_status}). Will retry next cycle."
+                    )
+                    if hasattr(self, "_open_positions"):
+                        self._open_positions[symbol] = {
+                            "signal": original_side.upper(),
+                            "entry_price": entry_price,
+                            "opened_at": open_row["opened_at"],
+                        }
+                    return
+
+                if not exit_price:
+                    ticker = await self.connector.fetch_ticker(symbol)
+                    exit_price = float(ticker.get("last") or entry_price)
+
+                gross_pnl = (
+                    (entry_price - exit_price) * filled_qty
+                    if original_side.lower() == "sell"
+                    else (exit_price - entry_price) * filled_qty
+                )
+                net_pnl, fee_amount = calculate_net_pnl(
+                    gross_pnl, entry_price, exit_price, filled_qty, fee_rate
+                )
+                total_net_pnl = cumulative_net_pnl + net_pnl
+                pnl_pct = (
+                    (total_net_pnl / (entry_price * total_quantity)) * 100
+                    if entry_price > 0 and total_quantity > 0
+                    else 0
+                )
+
+                if filled_qty + 1e-8 < remaining_quantity:
+                    new_remaining = max(remaining_quantity - filled_qty, 0.0)
+                    recorded = await self.db.record_partial_close(
+                        user_id=self.user_id,
+                        trade_id=trade_id,
+                        exit_price=exit_price,
+                        filled_quantity=filled_qty,
+                        remaining_quantity=new_remaining,
+                        partial_pnl=net_pnl,
+                        pnl_pct=pnl_pct,
+                        fee_amount=fee_amount,
+                        order_id=order_id,
+                    )
+                    if recorded and hasattr(self, "_open_positions"):
+                        self._open_positions[symbol] = {
+                            "signal": original_side.upper(),
+                            "entry_price": entry_price,
+                            "opened_at": open_row["opened_at"],
+                        }
+                    logger.warning(
+                        f"[{self.name}] ⚠️  Partial exit fill {symbol}: "
+                        f"filled={filled_qty:.8f} remaining={new_remaining:.8f}"
+                    )
+                    return
+
+                closed = await self.db.close_live_trade(
+                    trade_id,
+                    exit_price,
+                    net_pnl,
+                    pnl_pct,
+                    order_id,
+                    fee_amount=fee_amount,
+                    close_quantity=filled_qty,
+                )
                 if not closed:
                     logger.info(f"[{self.name}] ℹ️  {symbol} live close was a no-op (already closed)")
                     return
+                final_pnl = total_net_pnl
 
-            self.risk.record_trade_closed(pnl)
+            self.risk.record_trade_closed(final_pnl)
             await self.risk.persist_state(self.db, self.user_id, self.market_type)
 
         except Exception as e:
             logger.error(f"[{self.name}] ❌ Close trade failed {symbol}: {e}", exc_info=True)
-            # F3 FIX: _open_positions was already cleaned up before the try block.
-            # Even on exception, in-memory state is correct. Bot won't retry
-            # the exit loop. The DB record remains open until reconciliation.
+            if hasattr(self, "_open_positions"):
+                self._open_positions[symbol] = {
+                    "signal": original_side.upper(),
+                    "entry_price": entry_price,
+                    "opened_at": datetime.utcnow(),
+                }
 
     async def _execute_live_trade(self, symbol: str, signal: str, quantity: float, price: float):
-        """
-        F9 FIX: After placing the order, call fetch_order() to get the actual
-        filled quantity from the exchange. Pass actual_quantity to save_live_trade()
-        so the DB records reality, not the request.
-
-        PARTIAL FILL BEHAVIOR:
-          - If actual_qty < requested_qty: trade saved with actual_qty.
-            On next exit, close_trade uses open_row["quantity"] (actual_qty).
-            PnL calculation uses the correct filled position size.
-          - If fetch_order fails: fall back to requested_qty with warning.
-          - If actual_qty = 0 (order rejected): discard staged open, save
-            failed order record, don't create trade in DB.
-        """
         sl    = self.risk.calculate_stop_loss(price, signal)
         tp    = self.risk.calculate_take_profit(price, signal)
         order = None
         try:
             order    = await self.connector.place_order(symbol, signal, quantity)
             order_id = order.get("id", "")
-
-            # F9 FIX: Fetch actual fill quantity from exchange
-            actual_quantity = await self._fetch_actual_fill(order_id, symbol, quantity)
+            actual_quantity, actual_entry_price, _ = await self._fetch_fill_details(
+                order_id, symbol, quantity, float(order.get("average") or order.get("price") or price)
+            )
+            persisted_price = actual_entry_price or price
 
             if actual_quantity == 0.0:
-                # Order placed but nothing filled (rejected or cancelled immediately)
                 if hasattr(self, "_discard_staged_open"):
                     self._discard_staged_open(symbol)
                 logger.error(
@@ -454,12 +562,15 @@ class BaseAlgo(ABC):
                 )
                 return
 
-            trade_id = await self.db.save_live_trade(
-                self.user_id, symbol, signal, quantity,
-                price, sl, tp, order_id,
-                self.name, self.market_type,
-                session_ref=self._session_ref,
-                actual_quantity=actual_quantity,  # F9: pass actual fill
+            trade_id = await self._persist_live_trade(
+                symbol=symbol,
+                signal=signal,
+                requested_quantity=quantity,
+                actual_quantity=actual_quantity,
+                price=persisted_price,
+                stop_loss=sl,
+                take_profit=tp,
+                order_id=order_id,
             )
 
             if trade_id:
@@ -525,6 +636,11 @@ class BaseAlgo(ABC):
                         "Position recorded in failed_live_orders table."
                     )
 
+        except TradePersistenceError as e:
+            if hasattr(self, "_discard_staged_open"):
+                self._discard_staged_open(symbol)
+            await self.db.set_bot_error_state(self.user_id, str(e))
+            logger.critical(f"[{self.name}] 💀 {e}")
         except Exception as e:
             logger.error(f"[{self.name}] ❌ Live trade failed {symbol}: {e}", exc_info=True)
             if order is not None:
@@ -545,81 +661,112 @@ class BaseAlgo(ABC):
                     )
             raise
 
-    async def _fetch_actual_fill(
-        self, order_id: str, symbol: str, requested_qty: float
-    ) -> float:
-        """
-        F9: Fetch actual filled quantity for a just-placed order.
+    async def _persist_live_trade(
+        self,
+        symbol: str,
+        signal: str,
+        requested_quantity: float,
+        actual_quantity: float,
+        price: float,
+        stop_loss: float,
+        take_profit: float,
+        order_id: str,
+    ) -> Optional[str]:
+        import asyncio
 
-        Polls fetch_order() up to 3 times (3 second intervals) waiting for
-        the order to settle. Market orders on liquid pairs typically fill
-        within 1 second, so 3 polls is generous.
+        fee_rate = float(self.config.get("fee_rate", 0.001))
+        last_error: Optional[Exception] = None
 
-        Returns:
-          - Actual filled quantity (may be less than requested_qty for partial fills)
-          - 0.0 if order was cancelled/rejected
-          - requested_qty if fetch_order fails (fallback, with warning)
-        """
+        for attempt in range(3):
+            try:
+                return await self.db.save_live_trade(
+                    self.user_id, symbol, signal, requested_quantity,
+                    price, stop_loss, take_profit, order_id,
+                    self.name, self.market_type,
+                    session_ref=self._session_ref,
+                    actual_quantity=actual_quantity,
+                    exchange_name=self.connector.exchange_name,
+                    fee_rate=fee_rate,
+                )
+            except Exception as e:
+                last_error = e
+                if attempt < 2:
+                    wait = 0.5 * (2 ** attempt)
+                    logger.warning(
+                        f"[{self.name}] Live trade persistence failed for {symbol} "
+                        f"(attempt {attempt + 1}/3): {e}. Retrying in {wait:.1f}s."
+                    )
+                    await asyncio.sleep(wait)
+
+        payload = {
+            "user_id": self.user_id,
+            "symbol": symbol,
+            "side": signal.lower(),
+            "requested_quantity": requested_quantity,
+            "actual_quantity": actual_quantity,
+            "entry_price": price,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "order_id": order_id,
+            "algo_name": self.name,
+            "market_type": self.market_type,
+            "session_ref": self._session_ref,
+            "exchange_name": self.connector.exchange_name,
+            "fee_rate": fee_rate,
+            "retry_count": 0,
+            "last_error": str(last_error)[:300] if last_error else "unknown",
+            "spooled_at": datetime.utcnow().isoformat(),
+        }
+        await self.db.spool_live_trade(payload)
+        raise TradePersistenceError(
+            f"Live order executed for {symbol} but DB persistence failed. "
+            "Trade has been spooled for recovery and the bot was moved to error state."
+        )
+
+    async def _fetch_fill_details(
+        self, order_id: str, symbol: str, requested_qty: float, fallback_price: float
+    ) -> Tuple[float, float, str]:
         if not order_id:
-            logger.warning(f"[{self.name}] F9: No order_id — assuming full fill of {requested_qty:.8f}")
-            return requested_qty
-
-        MAX_POLLS    = 3
-        POLL_DELAY_S = 3.0
+            logger.warning(f"[{self.name}] No order_id — assuming full fill of {requested_qty:.8f}")
+            return requested_qty, fallback_price, "assumed"
 
         import asyncio
 
-        for poll in range(MAX_POLLS):
+        poll_delays = [1.0, 2.0, 2.0]
+        for poll, delay in enumerate(poll_delays):
             if poll > 0:
-                await asyncio.sleep(POLL_DELAY_S)
+                await asyncio.sleep(delay)
             try:
                 order_info  = await self.connector.fetch_order(order_id, symbol)
                 exch_status = str(order_info.get("status", "unknown")).lower()
                 filled_qty  = float(order_info.get("filled", 0) or 0)
+                avg_price = float(order_info.get("average") or order_info.get("price") or fallback_price or 0)
 
                 if exch_status in ("closed", "filled"):
-                    if abs(filled_qty - requested_qty) > 0.0001:
-                        logger.warning(
-                            f"[{self.name}] F9 partial fill detected: "
-                            f"symbol={symbol} requested={requested_qty:.8f} "
-                            f"filled={filled_qty:.8f}"
-                        )
-                    return filled_qty
+                    return filled_qty, avg_price, "filled"
 
-                elif exch_status in ("canceled", "cancelled", "rejected", "expired"):
+                if exch_status in ("canceled", "cancelled", "rejected", "expired"):
                     logger.warning(
-                        f"[{self.name}] F9: Order {order_id} {exch_status}. "
+                        f"[{self.name}] Order {order_id} {exch_status}. "
                         f"filled_qty={filled_qty:.8f}"
                     )
-                    return filled_qty  # may be partial fill before cancel
+                    return filled_qty, avg_price, exch_status
 
-                elif exch_status in ("open", "partially_filled", "partial"):
-                    # Still filling — keep polling
-                    logger.debug(
-                        f"[{self.name}] F9: Order {order_id} still {exch_status} "
-                        f"(poll {poll+1}/{MAX_POLLS}), filled so far={filled_qty:.8f}"
-                    )
+                if exch_status in ("open", "partially_filled", "partial"):
                     continue
 
-                else:
-                    # Unknown status — return what we have, try again
-                    logger.debug(
-                        f"[{self.name}] F9: Unknown order status '{exch_status}' "
-                        f"for {order_id} — continuing to poll"
-                    )
-                    continue
+                if filled_qty > 0:
+                    return filled_qty, avg_price, "partial"
 
             except Exception as e:
                 logger.warning(
-                    f"[{self.name}] F9: fetch_order failed for {order_id}: {e}. "
+                    f"[{self.name}] fetch_order failed for {order_id}: {e}. "
                     f"Falling back to requested_qty={requested_qty:.8f}"
                 )
-                # fetch_order failed — fall through to return requested_qty below
-                return requested_qty
+                return requested_qty, fallback_price, "assumed"
 
-        # Polls exhausted — order still not settled. Use requested_qty as fallback.
         logger.warning(
-            f"[{self.name}] F9: Order {order_id} not settled after {MAX_POLLS} polls. "
+            f"[{self.name}] Order {order_id} not settled after {sum(poll_delays):.0f}s. "
             f"Using requested_qty={requested_qty:.8f} as fallback."
         )
-        return requested_qty
+        return requested_qty, fallback_price, "assumed"

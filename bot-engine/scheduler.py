@@ -131,6 +131,15 @@ class BotScheduler:
             exchange_configs = await self._db.get_exchange_apis(user_id)
             risk_cfg         = await self._db.get_risk_settings(user_id)
             market_modes     = await self._db.get_market_modes(user_id)
+            try:
+                replay = await self._db.flush_spooled_live_trades(user_id)
+                if replay["restored"] or replay["remaining"]:
+                    logger.info(
+                        f"♻️  Pending live trade replay for user={user_id[:8]}… "
+                        f"restored={replay['restored']} remaining={replay['remaining']}"
+                    )
+            except Exception as e:
+                logger.warning(f"⚠️  Could not replay spooled live trades: {e}")
 
             ctx = BotContext(user_id=user_id, markets=[])
             if session_ids:
