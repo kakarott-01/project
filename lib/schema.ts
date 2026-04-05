@@ -19,6 +19,9 @@ export const strategyMarketEnum    = pgEnum('strategy_market_enum', ['CRYPTO', '
 export const strategyExecutionModeEnum = pgEnum('strategy_execution_mode', ['SAFE', 'AGGRESSIVE'])
 export const strategyConfigSlotEnum = pgEnum('strategy_config_slot', ['PRIMARY', 'SECONDARY'])
 export const backtestStatusEnum    = pgEnum('backtest_status', ['queued', 'completed', 'failed'])
+export const positionModeEnum      = pgEnum('position_mode', ['NET', 'HEDGE'])
+export const positionDirectionEnum = pgEnum('position_direction', ['LONG', 'SHORT'])
+export const positionLifecycleEnum = pgEnum('position_lifecycle', ['open', 'closed'])
 
 // ─── Users ────────────────────────────────────────────────────────────────────
 export const users = pgTable('users', {
@@ -107,6 +110,15 @@ export const marketStrategyConfigs = pgTable('market_strategy_configs', {
   userId:        uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
   marketType:    marketTypeEnum('market_type').notNull(),
   executionMode: strategyExecutionModeEnum('execution_mode').default('SAFE').notNull(),
+  positionMode:  positionModeEnum('position_mode').default('NET').notNull(),
+  allowHedgeOpposition: boolean('allow_hedge_opposition').default(false).notNull(),
+  conflictBlocking: boolean('conflict_blocking').default(false).notNull(),
+  aggressiveConfirmedAt: timestamp('aggressive_confirmed_at'),
+  maxPositionsPerSymbol: integer('max_positions_per_symbol').default(2).notNull(),
+  maxCapitalPerStrategyPct: decimal('max_capital_per_strategy_pct', { precision: 6, scale: 2 }).default('25.00').notNull(),
+  maxDrawdownPct: decimal('max_drawdown_pct', { precision: 6, scale: 2 }).default('12.00').notNull(),
+  conflictWarnings: jsonb('conflict_warnings').$type<Array<{ code: string; severity: 'info' | 'warning' | 'blocking'; message: string }>>().default([]).notNull(),
+  exchangeCapabilities: jsonb('exchange_capabilities').$type<{ supportsHedgeMode: boolean; effectivePositionMode?: 'NET' | 'HEDGE'; warning?: string } | null>(),
   createdAt:     timestamp('created_at').defaultNow().notNull(),
   updatedAt:     timestamp('updated_at').defaultNow().notNull(),
 }, (t) => ({
@@ -135,10 +147,14 @@ export const backtestRuns = pgTable('backtest_runs', {
   initialCapital:     decimal('initial_capital', { precision: 20, scale: 2 }).notNull(),
   strategyKeys:       jsonb('strategy_keys').$type<string[]>().notNull(),
   executionMode:      strategyExecutionModeEnum('execution_mode').notNull(),
+  positionMode:       positionModeEnum('position_mode').default('NET').notNull(),
+  allowHedgeOpposition: boolean('allow_hedge_opposition').default(false).notNull(),
+  strategyConfigId:   uuid('strategy_config_id'),
   status:             backtestStatusEnum('status').default('queued').notNull(),
   performanceMetrics: jsonb('performance_metrics'),
   equityCurve:        jsonb('equity_curve'),
   tradeSummary:       jsonb('trade_summary'),
+  strategyBreakdown:  jsonb('strategy_breakdown'),
   comparisonLabel:    varchar('comparison_label', { length: 150 }),
   errorMessage:       text('error_message'),
   createdAt:          timestamp('created_at').defaultNow().notNull(),
@@ -146,6 +162,90 @@ export const backtestRuns = pgTable('backtest_runs', {
 }, (t) => ({
   userCreatedIdx: index('backtest_runs_user_created_idx').on(t.userId, t.createdAt),
   statusIdx: index('backtest_runs_status_idx').on(t.status),
+}))
+
+export const strategyConfigs = pgTable('strategy_configs', {
+  id:                 uuid('id').defaultRandom().primaryKey(),
+  userId:             uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  marketType:         marketTypeEnum('market_type').notNull(),
+  executionMode:      strategyExecutionModeEnum('execution_mode').notNull(),
+  positionMode:       positionModeEnum('position_mode').default('NET').notNull(),
+  allowHedgeOpposition: boolean('allow_hedge_opposition').default(false).notNull(),
+  strategyKeys:       jsonb('strategy_keys').$type<string[]>().notNull(),
+  asset:              varchar('asset', { length: 100 }),
+  timeframe:          varchar('timeframe', { length: 20 }),
+  initialCapital:     decimal('initial_capital', { precision: 20, scale: 2 }),
+  conflictWarnings:   jsonb('conflict_warnings').$type<Array<{ code: string; severity: 'info' | 'warning' | 'blocking'; message: string }>>().default([]).notNull(),
+  exchangeCapabilities: jsonb('exchange_capabilities').$type<{ supportsHedgeMode: boolean; effectivePositionMode?: 'NET' | 'HEDGE'; warning?: string } | null>(),
+  source:             varchar('source', { length: 30 }).default('manual').notNull(),
+  createdAt:          timestamp('created_at').defaultNow().notNull(),
+  updatedAt:          timestamp('updated_at').defaultNow().notNull(),
+}, (t) => ({
+  userMarketIdx: index('strategy_configs_user_market_idx').on(t.userId, t.marketType, t.createdAt),
+}))
+
+export const strategyPositions = pgTable('strategy_positions', {
+  id:                  uuid('id').defaultRandom().primaryKey(),
+  userId:              uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  marketType:          marketTypeEnum('market_type').notNull(),
+  symbol:              varchar('symbol', { length: 50 }).notNull(),
+  strategyId:          uuid('strategy_id').references(() => strategies.id, { onDelete: 'set null' }),
+  strategyKey:         varchar('strategy_key', { length: 100 }).notNull(),
+  executionMode:       strategyExecutionModeEnum('execution_mode').notNull(),
+  positionMode:        positionModeEnum('position_mode').default('NET').notNull(),
+  direction:           positionDirectionEnum('direction').notNull(),
+  lifecycle:           positionLifecycleEnum('lifecycle').default('open').notNull(),
+  size:                decimal('size', { precision: 20, scale: 8 }).notNull(),
+  remainingSize:       decimal('remaining_size', { precision: 20, scale: 8 }).notNull(),
+  entryPrice:          decimal('entry_price', { precision: 20, scale: 8 }).notNull(),
+  exitPrice:           decimal('exit_price', { precision: 20, scale: 8 }),
+  realizedPnl:         decimal('realized_pnl', { precision: 20, scale: 8 }).default('0').notNull(),
+  unrealizedPnl:       decimal('unrealized_pnl', { precision: 20, scale: 8 }).default('0').notNull(),
+  maxAdverseExcursion: decimal('max_adverse_excursion', { precision: 20, scale: 8 }).default('0').notNull(),
+  metadata:            jsonb('metadata'),
+  openedAt:            timestamp('opened_at').defaultNow().notNull(),
+  closedAt:            timestamp('closed_at'),
+}, (t) => ({
+  userSymbolIdx: index('strategy_positions_user_symbol_idx').on(t.userId, t.marketType, t.symbol, t.lifecycle),
+  strategyIdx: index('strategy_positions_strategy_idx').on(t.userId, t.marketType, t.strategyKey, t.lifecycle),
+}))
+
+export const strategyPerformance = pgTable('strategy_performance', {
+  id:                 uuid('id').defaultRandom().primaryKey(),
+  userId:             uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  marketType:         marketTypeEnum('market_type').notNull(),
+  strategyId:         uuid('strategy_id').references(() => strategies.id, { onDelete: 'set null' }),
+  strategyKey:        varchar('strategy_key', { length: 100 }).notNull(),
+  totalTrades:        integer('total_trades').default(0).notNull(),
+  winningTrades:      integer('winning_trades').default(0).notNull(),
+  losingTrades:       integer('losing_trades').default(0).notNull(),
+  openPositions:      integer('open_positions').default(0).notNull(),
+  realizedPnl:        decimal('realized_pnl', { precision: 20, scale: 8 }).default('0').notNull(),
+  unrealizedPnl:      decimal('unrealized_pnl', { precision: 20, scale: 8 }).default('0').notNull(),
+  maxDrawdownPct:     decimal('max_drawdown_pct', { precision: 8, scale: 4 }).default('0').notNull(),
+  lastBacktestReturnPct: decimal('last_backtest_return_pct', { precision: 10, scale: 4 }),
+  lastTradeAt:        timestamp('last_trade_at'),
+  updatedAt:          timestamp('updated_at').defaultNow().notNull(),
+}, (t) => ({
+  userStrategyIdx: index('strategy_performance_user_market_strategy_idx').on(t.userId, t.marketType, t.strategyKey),
+}))
+
+export const backtestResults = pgTable('backtest_results', {
+  id:                 uuid('id').defaultRandom().primaryKey(),
+  runId:              uuid('run_id').references(() => backtestRuns.id, { onDelete: 'cascade' }).notNull(),
+  userId:             uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  marketType:         marketTypeEnum('market_type').notNull(),
+  strategyKeys:       jsonb('strategy_keys').$type<string[]>().notNull(),
+  executionMode:      strategyExecutionModeEnum('execution_mode').notNull(),
+  positionMode:       positionModeEnum('position_mode').default('NET').notNull(),
+  strategyBreakdown:  jsonb('strategy_breakdown'),
+  performanceMetrics: jsonb('performance_metrics').notNull(),
+  equityCurve:        jsonb('equity_curve').notNull(),
+  tradeSummary:       jsonb('trade_summary').notNull(),
+  createdAt:          timestamp('created_at').defaultNow().notNull(),
+}, (t) => ({
+  runIdx: index('backtest_results_run_idx').on(t.runId),
+  userIdx: index('backtest_results_user_idx').on(t.userId, t.createdAt),
 }))
 
 // ─── Exchange APIs ─────────────────────────────────────────────────────────────
@@ -379,6 +479,10 @@ export const usersRelations = relations(users, ({ many, one }) => ({
   trades:             many(trades),
   algoSignals:        many(algoSignals),
   backtestRuns:       many(backtestRuns),
+  strategyConfigs:    many(strategyConfigs),
+  strategyPositions:  many(strategyPositions),
+  strategyPerformances: many(strategyPerformance),
+  backtestResults:    many(backtestResults),
   modeAuditLogs:      many(modeAuditLogs),
   botSessions:        many(botSessions),
   positionCloseLogs:  many(positionCloseLog),
@@ -444,3 +548,7 @@ export type RiskState         = typeof riskState.$inferSelect
 export type ReconciliationLog = typeof reconciliationLog.$inferSelect
 export type StopMode          = 'close_all' | 'graceful'
 export type BacktestRun       = typeof backtestRuns.$inferSelect
+export type StrategyConfigSnapshot = typeof strategyConfigs.$inferSelect
+export type StrategyPosition = typeof strategyPositions.$inferSelect
+export type StrategyPerformanceRow = typeof strategyPerformance.$inferSelect
+export type BacktestResult = typeof backtestResults.$inferSelect

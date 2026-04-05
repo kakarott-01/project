@@ -226,7 +226,17 @@ class Database:
         pool = await self.pool()
         rows = await pool.fetch(
             """
-            SELECT c.execution_mode, s.strategy_key, sel.slot
+            SELECT
+              c.execution_mode,
+              c.position_mode,
+              c.allow_hedge_opposition,
+              c.conflict_blocking,
+              c.max_positions_per_symbol,
+              c.max_capital_per_strategy_pct,
+              c.max_drawdown_pct,
+              c.exchange_capabilities,
+              s.strategy_key,
+              sel.slot
             FROM market_strategy_configs c
             LEFT JOIN market_strategy_selections sel ON sel.config_id = c.id
             LEFT JOIN strategies s ON s.id = sel.strategy_id
@@ -236,11 +246,18 @@ class Database:
             user_id, market_type,
         )
         if not rows:
-            return {"execution_mode": "SAFE", "strategy_keys": []}
+            return {"execution_mode": "SAFE", "position_mode": "NET", "strategy_keys": []}
 
         strategy_keys = [row["strategy_key"] for row in rows if row["strategy_key"]]
         return {
             "execution_mode": rows[0]["execution_mode"] or "SAFE",
+            "position_mode": rows[0]["position_mode"] or "NET",
+            "allow_hedge_opposition": bool(rows[0]["allow_hedge_opposition"]),
+            "conflict_blocking": bool(rows[0]["conflict_blocking"]),
+            "max_positions_per_symbol": int(rows[0]["max_positions_per_symbol"] or 2),
+            "max_capital_per_strategy_pct": float(rows[0]["max_capital_per_strategy_pct"] or 25),
+            "max_drawdown_pct": float(rows[0]["max_drawdown_pct"] or 12),
+            "exchange_capabilities": rows[0]["exchange_capabilities"],
             "strategy_keys": strategy_keys,
         }
 
@@ -635,13 +652,36 @@ class Database:
     async def get_open_trades_for_symbol(self, user_id: str, market_type: str, symbol: str) -> List[Dict[str, Any]]:
         pool = await self.pool()
         rows = await pool.fetch(
-            """SELECT id::text, side, strategy_key, position_scope_key
+            """SELECT id::text, side, strategy_key, position_scope_key, entry_price, quantity, remaining_quantity
                FROM trades
                WHERE user_id=$1 AND market_type=$2 AND symbol=$3 AND status='open'
                ORDER BY opened_at ASC""",
             user_id, market_type, symbol,
         )
         return [dict(row) for row in rows]
+
+    async def get_trade_by_id(self, trade_id: str) -> Optional[Dict[str, Any]]:
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            """SELECT id::text, user_id::text, symbol, side, strategy_key, position_scope_key,
+                      market_type, quantity, remaining_quantity, entry_price, opened_at
+               FROM trades
+               WHERE id=$1""",
+            trade_id,
+        )
+        return dict(row) if row else None
+
+    async def get_open_strategy_exposure(self, user_id: str, market_type: str, strategy_key: Optional[str]) -> float:
+        if not strategy_key:
+            return 0.0
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            """SELECT COALESCE(SUM(COALESCE(remaining_quantity, quantity) * entry_price), 0) AS notional
+               FROM trades
+               WHERE user_id=$1 AND market_type=$2 AND strategy_key=$3 AND status='open'""",
+            user_id, market_type, strategy_key,
+        )
+        return float(row["notional"]) if row and row["notional"] is not None else 0.0
 
     async def get_reconciliation_last_run(self, user_id: str, market_type: str) -> Optional[datetime]:
         pool = await self.pool()

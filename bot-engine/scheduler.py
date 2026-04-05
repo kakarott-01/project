@@ -162,6 +162,8 @@ class BotScheduler:
                 strategy_cfg = await self._db.get_market_strategy_config(user_id, market)
                 strategy_keys = strategy_cfg.get("strategy_keys", [])
                 execution_mode = strategy_cfg.get("execution_mode", "SAFE")
+                position_mode = strategy_cfg.get("position_mode", "NET")
+                allow_hedge_opposition = bool(strategy_cfg.get("allow_hedge_opposition", False))
                 if not strategy_keys:
                     logger.warning(f"⚠️  No strategy config for market={market}, skipping")
                     continue
@@ -173,6 +175,9 @@ class BotScheduler:
                 # Using a shared RiskManager across markets was incorrect because
                 # Indian market max trades shouldn't block Crypto from opening.
                 risk_mgr = RiskManager(risk_cfg)
+                risk_mgr.cfg.max_positions_per_symbol = int(strategy_cfg.get("max_positions_per_symbol", risk_mgr.cfg.max_positions_per_symbol))
+                risk_mgr.cfg.max_capital_per_strategy_pct = float(strategy_cfg.get("max_capital_per_strategy_pct", risk_mgr.cfg.max_capital_per_strategy_pct))
+                risk_mgr.cfg.max_drawdown_pct = float(strategy_cfg.get("max_drawdown_pct", risk_mgr.cfg.max_drawdown_pct))
                 try:
                     await risk_mgr.load_state(self._db, user_id, market)
                 except Exception as e:
@@ -202,6 +207,8 @@ class BotScheduler:
                         market_type_name=market,
                         strategy_keys=scope["strategy_keys"],
                         execution_mode=scope["execution_mode"],
+                        position_mode=position_mode,
+                        allow_hedge_opposition=allow_hedge_opposition,
                         position_scope_key=scope["position_scope_key"],
                     )
                     algo._risk_loaded = True

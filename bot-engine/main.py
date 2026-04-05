@@ -181,6 +181,8 @@ class BacktestRequest(BaseModel):
     date_to: str
     initial_capital: float
     execution_mode: str
+    position_mode: str = "NET"
+    allow_hedge_opposition: bool = False
     strategy_keys: List[str]
 
 
@@ -305,6 +307,8 @@ async def run_backtest_endpoint(req: BacktestRequest):
             df=df,
             strategy_keys=req.strategy_keys,
             execution_mode=req.execution_mode,
+            position_mode=req.position_mode,
+            allow_hedge_opposition=req.allow_hedge_opposition,
             initial_capital=req.initial_capital,
         )
         return result

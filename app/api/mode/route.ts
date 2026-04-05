@@ -13,6 +13,7 @@ import { eq, and }                              from 'drizzle-orm'
 import { z }                                    from 'zod'
 import { getClientIp }                          from '@/lib/utils'
 import { verifySecureToken }                    from '@/lib/secure-token'  // FIX
+import { assertBotStoppedForSensitiveMutation } from '@/lib/strategies/locks'
 
 const switchSchema = z.object({
   marketType: z.enum(['indian', 'crypto', 'commodities', 'global']),
@@ -64,17 +65,10 @@ export async function POST(req: NextRequest) {
 
   const { marketType, toMode } = parsed.data
 
-  // Guard 1: bot must be stopped
-  const botStatus = await db.query.botStatuses.findFirst({
-    where: eq(botStatuses.userId, session.id),
-    columns: { status: true },
-  })
-
-  if (botStatus?.status === 'running') {
-    return NextResponse.json(
-      { error: 'Stop the bot before changing trading mode.' },
-      { status: 409 }
-    )
+  try {
+    await assertBotStoppedForSensitiveMutation(session.id, 'Stop the bot before changing trading mode.')
+  } catch (error) {
+    return NextResponse.json({ error: (error as Error).message }, { status: (error as Error & { status?: number }).status ?? 409 })
   }
 
   // Load current config

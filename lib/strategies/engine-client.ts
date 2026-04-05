@@ -7,6 +7,8 @@ type BacktestEngineRequest = {
   dateTo: string
   initialCapital: number
   executionMode: 'SAFE' | 'AGGRESSIVE'
+  positionMode: 'NET' | 'HEDGE'
+  allowHedgeOpposition: boolean
   strategyKeys: string[]
 }
 
@@ -26,6 +28,8 @@ export async function runEngineBacktest(payload: BacktestEngineRequest) {
       date_to: payload.dateTo,
       initial_capital: payload.initialCapital,
       execution_mode: payload.executionMode,
+      position_mode: payload.positionMode,
+      allow_hedge_opposition: payload.allowHedgeOpposition,
       strategy_keys: payload.strategyKeys,
     }),
     signal: AbortSignal.timeout(60_000),

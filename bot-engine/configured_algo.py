@@ -23,11 +23,15 @@ class ConfiguredMultiStrategyAlgo(BaseAlgo):
         strategy_keys: List[str],
         execution_mode: str,
         position_scope_key: str,
+        position_mode: str,
+        allow_hedge_opposition: bool,
         **kwargs,
     ):
         self._market_type_name = market_type_name
         self._strategy_keys = strategy_keys
         self._execution_mode = execution_mode
+        self._position_mode = position_mode
+        self._allow_hedge_opposition = allow_hedge_opposition
         self._executor = BlackBoxStrategyExecutor()
         self._open_positions: Dict[str, Dict] = {}
         self._db_synced: set = set()
@@ -36,6 +40,9 @@ class ConfiguredMultiStrategyAlgo(BaseAlgo):
             *args,
             position_scope_key=position_scope_key,
             strategy_key=strategy_keys[0] if len(strategy_keys) == 1 else None,
+            execution_mode=execution_mode,
+            position_mode=position_mode,
+            allow_hedge_opposition=allow_hedge_opposition,
             **kwargs,
         )
         scope_label = position_scope_key.replace("|", "_")
@@ -131,7 +138,11 @@ class ConfiguredMultiStrategyAlgo(BaseAlgo):
             return self._check_exit(symbol, latest_close, decision)
 
         if decision in ("BUY", "SELL"):
-            if len(self._strategy_keys) == 1 and self._execution_mode == "AGGRESSIVE":
+            if (
+                len(self._strategy_keys) == 1
+                and self._execution_mode == "AGGRESSIVE"
+                and (self._position_mode != "HEDGE" or not self._allow_hedge_opposition)
+            ):
                 open_trades = await self.db.get_open_trades_for_symbol(
                     self.user_id, self.market_type, symbol
                 )

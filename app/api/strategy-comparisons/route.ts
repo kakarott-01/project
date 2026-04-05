@@ -14,11 +14,15 @@ const comparisonSchema = z.object({
   left: z.object({
     label: z.string().min(1).max(60),
     executionMode: z.enum(['SAFE', 'AGGRESSIVE']),
+    positionMode: z.enum(['NET', 'HEDGE']).default('NET'),
+    allowHedgeOpposition: z.boolean().default(false),
     strategyKeys: z.array(z.string().min(1)).min(1).max(2),
   }),
   right: z.object({
     label: z.string().min(1).max(60),
     executionMode: z.enum(['SAFE', 'AGGRESSIVE']),
+    positionMode: z.enum(['NET', 'HEDGE']).default('NET'),
+    allowHedgeOpposition: z.boolean().default(false),
     strategyKeys: z.array(z.string().min(1)).min(1).max(2),
   }),
 })
@@ -47,6 +51,8 @@ export async function POST(req: NextRequest) {
         dateTo: parsed.data.dateTo,
         initialCapital: parsed.data.initialCapital,
         executionMode: left.executionMode,
+        positionMode: left.positionMode,
+        allowHedgeOpposition: left.allowHedgeOpposition,
         strategyKeys: left.strategyKeys,
       }),
       runEngineBacktest({
@@ -58,6 +64,8 @@ export async function POST(req: NextRequest) {
         dateTo: parsed.data.dateTo,
         initialCapital: parsed.data.initialCapital,
         executionMode: right.executionMode,
+        positionMode: right.positionMode,
+        allowHedgeOpposition: right.allowHedgeOpposition,
         strategyKeys: right.strategyKeys,
       }),
     ])

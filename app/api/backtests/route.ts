@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
-import { backtestRuns } from '@/lib/schema'
+import { backtestResults, backtestRuns, strategyConfigs } from '@/lib/schema'
 import { runEngineBacktest } from '@/lib/strategies/engine-client'
 import { backtestRequestSchema, validateStrategiesForMarket } from '@/lib/strategies/validation'
 import { ensureStrategyCatalogSeeded } from '@/lib/strategies/catalog'
 import { eq } from 'drizzle-orm'
+import { analyzeStrategyConflicts } from '@/lib/strategies/conflicts'
 
 export async function POST(req: NextRequest) {
   const session = await auth()
@@ -19,6 +20,21 @@ export async function POST(req: NextRequest) {
   try {
     await ensureStrategyCatalogSeeded()
     validateStrategiesForMarket(parsed.data.marketType, parsed.data.strategyKeys, parsed.data.timeframe)
+    const conflicts = analyzeStrategyConflicts(parsed.data.strategyKeys)
+
+    const [configSnapshot] = await db.insert(strategyConfigs).values({
+      userId: session.id,
+      marketType: parsed.data.marketType,
+      executionMode: parsed.data.executionMode,
+      positionMode: parsed.data.positionMode,
+      allowHedgeOpposition: parsed.data.allowHedgeOpposition,
+      strategyKeys: parsed.data.strategyKeys,
+      asset: parsed.data.asset,
+      timeframe: parsed.data.timeframe,
+      initialCapital: parsed.data.initialCapital.toFixed(2),
+      conflictWarnings: conflicts,
+      source: 'backtest',
+    }).returning({ id: strategyConfigs.id })
 
     const created = await db.insert(backtestRuns).values({
       userId: session.id,
@@ -30,6 +46,9 @@ export async function POST(req: NextRequest) {
       initialCapital: parsed.data.initialCapital.toFixed(2),
       strategyKeys: parsed.data.strategyKeys,
       executionMode: parsed.data.executionMode,
+      positionMode: parsed.data.positionMode,
+      allowHedgeOpposition: parsed.data.allowHedgeOpposition,
+      strategyConfigId: configSnapshot.id,
       comparisonLabel: parsed.data.comparisonLabel,
       status: 'queued',
     }).returning({ id: backtestRuns.id })
@@ -43,6 +62,8 @@ export async function POST(req: NextRequest) {
       dateTo: parsed.data.dateTo,
       initialCapital: parsed.data.initialCapital,
       executionMode: parsed.data.executionMode,
+      positionMode: parsed.data.positionMode,
+      allowHedgeOpposition: parsed.data.allowHedgeOpposition,
       strategyKeys: parsed.data.strategyKeys,
     })
 
@@ -52,9 +73,23 @@ export async function POST(req: NextRequest) {
         performanceMetrics: result.performance_metrics,
         equityCurve: result.equity_curve,
         tradeSummary: result.trade_summary,
+        strategyBreakdown: result.strategy_breakdown,
         completedAt: new Date(),
       })
       .where(eq(backtestRuns.id, created[0].id))
+
+    await db.insert(backtestResults).values({
+      runId: created[0].id,
+      userId: session.id,
+      marketType: parsed.data.marketType,
+      strategyKeys: parsed.data.strategyKeys,
+      executionMode: parsed.data.executionMode,
+      positionMode: parsed.data.positionMode,
+      performanceMetrics: result.performance_metrics,
+      equityCurve: result.equity_curve,
+      tradeSummary: result.trade_summary,
+      strategyBreakdown: result.strategy_breakdown,
+    })
 
     return NextResponse.json({
       id: created[0].id,

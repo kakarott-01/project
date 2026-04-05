@@ -145,7 +145,7 @@ def _sharpe_from_trade_returns(returns: List[float]) -> float:
     return float((series.mean() / std) * math.sqrt(len(series)))
 
 
-def run_backtest(
+def _run_single_strategy_backtest(
     df: pd.DataFrame,
     strategy_keys: List[str],
     execution_mode: str,
@@ -224,4 +224,96 @@ def run_backtest(
         "performance_metrics": performance_metrics,
         "equity_curve": equity_curve,
         "trade_summary": trades,
+    }
+
+
+def run_backtest(
+    df: pd.DataFrame,
+    strategy_keys: List[str],
+    execution_mode: str,
+    initial_capital: float,
+    position_mode: str = "NET",
+    allow_hedge_opposition: bool = False,
+    engine_cfg: Optional[EngineConfig] = None,
+) -> Dict:
+    if execution_mode == "AGGRESSIVE" and position_mode == "HEDGE" and len(strategy_keys) > 1:
+        per_strategy_capital = initial_capital / len(strategy_keys)
+        strategy_breakdown: Dict[str, Dict] = {}
+        aggregate_curve: List[Dict] = []
+        aggregate_trades: List[Dict] = []
+        trade_returns: List[float] = []
+
+        for strategy_key in strategy_keys:
+            result = _run_single_strategy_backtest(
+                df=df,
+                strategy_keys=[strategy_key],
+                execution_mode="AGGRESSIVE",
+                initial_capital=per_strategy_capital,
+                engine_cfg=engine_cfg,
+            )
+            strategy_breakdown[strategy_key] = result["performance_metrics"]
+
+            for index, point in enumerate(result["equity_curve"]):
+                if len(aggregate_curve) <= index:
+                    aggregate_curve.append({
+                        "timestamp": point["timestamp"],
+                        "equity": 0.0,
+                    })
+                aggregate_curve[index]["equity"] = round(
+                    float(aggregate_curve[index]["equity"]) + float(point["equity"]), 2
+                )
+
+            for trade in result["trade_summary"]:
+                aggregate_trades.append({
+                    **trade,
+                    "strategyKey": strategy_key,
+                })
+                trade_returns.append(float(trade["result"]))
+
+        aggregate_trades.sort(key=lambda item: item.get("tradeNumber", 0))
+        wins = [ret for ret in trade_returns if ret > 0]
+        losses = [abs(ret) for ret in trade_returns if ret < 0]
+        final_equity = float(aggregate_curve[-1]["equity"]) if aggregate_curve else initial_capital
+        total_return_pct = ((final_equity - initial_capital) / initial_capital) * 100 if initial_capital else 0.0
+        profit_factor = (sum(wins) / sum(losses)) if losses else (sum(wins) if wins else 0.0)
+
+        performance_metrics = {
+            "totalReturnPct": round(total_return_pct, 4),
+            "winRate": round((len(wins) / len(aggregate_trades)) * 100, 2) if aggregate_trades else 0.0,
+            "maxDrawdown": round(_max_drawdown_from_equity(aggregate_curve), 4),
+            "sharpeRatio": round(_sharpe_from_trade_returns(trade_returns), 4),
+            "profitFactor": round(profit_factor, 4),
+        }
+
+        return {
+            "performance_metrics": performance_metrics,
+            "equity_curve": aggregate_curve,
+            "trade_summary": aggregate_trades,
+            "strategy_breakdown": strategy_breakdown,
+            "position_mode": position_mode,
+            "allow_hedge_opposition": allow_hedge_opposition,
+        }
+
+    overall = _run_single_strategy_backtest(
+        df=df,
+        strategy_keys=strategy_keys,
+        execution_mode=execution_mode,
+        initial_capital=initial_capital,
+        engine_cfg=engine_cfg,
+    )
+    strategy_breakdown = {
+        strategy_key: _run_single_strategy_backtest(
+            df=df,
+            strategy_keys=[strategy_key],
+            execution_mode="AGGRESSIVE",
+            initial_capital=initial_capital / max(len(strategy_keys), 1),
+            engine_cfg=engine_cfg,
+        )["performance_metrics"]
+        for strategy_key in strategy_keys
+    }
+    return {
+        **overall,
+        "strategy_breakdown": strategy_breakdown,
+        "position_mode": position_mode,
+        "allow_hedge_opposition": allow_hedge_opposition,
     }

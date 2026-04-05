@@ -36,6 +36,13 @@
       "when": 1775600000000,
       "tag": "0004_aggressive_scope_positions",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1775700000000,
+      "tag": "0005_production_position_architecture",
+      "breakpoints": true
     }
   ]
 }

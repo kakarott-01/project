@@ -81,8 +81,7 @@ export default function DashboardPage() {
 
       {aggressiveMarkets.length > 0 && (
         <div className="bg-red-950/25 border border-red-900/35 rounded-xl px-4 py-3 text-sm text-red-200">
-          Aggressive mode is enabled for: {aggressiveMarkets.join(', ')}. Independent strategy-scoped live positions are active,
-          while opposite-direction overlap on the same symbol is blocked for safety.
+          AGGRESSIVE MODE ENABLED for: {aggressiveMarkets.join(', ')}. Strategies run independently, volatility is higher, and opposite trades may occur when hedge mode is active.
         </div>
       )}
 

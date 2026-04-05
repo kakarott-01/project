@@ -31,6 +31,9 @@ class RiskConfig:
     take_profit_pct:    float = 3.0
     max_daily_loss_pct: float = 5.0
     max_open_trades:    int   = 3
+    max_positions_per_symbol: int = 2
+    max_capital_per_strategy_pct: float = 25.0
+    max_drawdown_pct: float = 12.0
     cooldown_seconds:   int   = 300
     trailing_stop:      bool  = False
 
@@ -44,6 +47,9 @@ class RiskManager:
             take_profit_pct    = float(cfg.get("take_profit_pct",    3.0)),
             max_daily_loss_pct = float(cfg.get("max_daily_loss_pct", 5.0)),
             max_open_trades    = int(cfg.get("max_open_trades",      3)),
+            max_positions_per_symbol = int(cfg.get("max_positions_per_symbol", 2)),
+            max_capital_per_strategy_pct = float(cfg.get("max_capital_per_strategy_pct", 25.0)),
+            max_drawdown_pct = float(cfg.get("max_drawdown_pct", 12.0)),
             cooldown_seconds   = int(cfg.get("cooldown_seconds",     300)),
             trailing_stop      = bool(cfg.get("trailing_stop",       False)),
         )
@@ -158,6 +164,34 @@ class RiskManager:
         remaining = self._cooldown_remaining()
         if remaining > 0:
             return False, f"Cooldown active — {remaining:.0f}s remaining"
+
+        return True, "ok"
+
+    def can_open_position(
+        self,
+        balance: float,
+        position_count_for_symbol: int,
+        strategy_capital_pct: float,
+        drawdown_pct: float,
+    ) -> tuple[bool, str]:
+        ok, reason = self.can_trade(balance)
+        if not ok:
+            return ok, reason
+
+        if position_count_for_symbol >= self.cfg.max_positions_per_symbol:
+            return False, f"Max positions per symbol ({self.cfg.max_positions_per_symbol}) reached"
+
+        if strategy_capital_pct >= self.cfg.max_capital_per_strategy_pct:
+            return False, (
+                f"Capital allocation per strategy exceeds "
+                f"{self.cfg.max_capital_per_strategy_pct:.2f}%"
+            )
+
+        # Hedge mode can offset directional risk, but it also increases
+        # operational complexity and margin usage. We hard-stop new entries
+        # once the strategy drawdown breaches the configured threshold.
+        if drawdown_pct >= self.cfg.max_drawdown_pct:
+            return False, f"Drawdown limit ({self.cfg.max_drawdown_pct:.2f}%) reached"
 
         return True, "ok"
 

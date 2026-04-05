@@ -45,6 +45,8 @@ export default function BacktestsPage() {
   const [asset, setAsset] = useState<string>(DEFAULT_ASSETS.crypto)
   const [timeframe, setTimeframe] = useState('15m')
   const [executionMode, setExecutionMode] = useState<'SAFE' | 'AGGRESSIVE'>('SAFE')
+  const [positionMode, setPositionMode] = useState<'NET' | 'HEDGE'>('NET')
+  const [allowHedgeOpposition, setAllowHedgeOpposition] = useState(false)
   const [initialCapital, setInitialCapital] = useState(10000)
   const [dateFrom, setDateFrom] = useState(() => new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 16))
   const [dateTo, setDateTo] = useState(() => new Date().toISOString().slice(0, 16))
@@ -78,6 +80,13 @@ export default function BacktestsPage() {
   }, [marketType])
 
   useEffect(() => {
+    if (executionMode === 'SAFE') {
+      setPositionMode('NET')
+      setAllowHedgeOpposition(false)
+    }
+  }, [executionMode])
+
+  useEffect(() => {
     setStrategyKeys((current) => current.filter((key) => filteredStrategies.some((strategy: any) => strategy.strategyKey === key)).slice(0, 2))
   }, [filteredStrategies])
 
@@ -104,6 +113,8 @@ export default function BacktestsPage() {
           asset,
           timeframe,
           executionMode,
+          positionMode,
+          allowHedgeOpposition,
           initialCapital,
           dateFrom: new Date(dateFrom).toISOString(),
           dateTo: new Date(dateTo).toISOString(),
@@ -121,6 +132,15 @@ export default function BacktestsPage() {
     },
     onError: (err: Error) => {
       setError(err.message)
+    },
+  })
+
+  const deployMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const res = await fetch(`/api/backtests/${id}/deploy`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to deploy configuration')
+      return data
     },
   })
 
@@ -178,8 +198,7 @@ export default function BacktestsPage() {
             <div className="bg-red-950/30 border border-red-900/40 rounded-lg px-3 py-2.5 flex items-start gap-2.5">
               <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
               <p className="text-xs text-red-200/85">
-                Aggressive mode will simulate independent strategy decisions. Live trading also uses aggressive scopes,
-                but opposite-direction overlap on the same symbol is blocked for safety.
+                AGGRESSIVE MODE ENABLED: strategies run independently, risk is higher, and opposite trades may occur if hedge mode is enabled.
               </p>
             </div>
           )}
@@ -237,6 +256,33 @@ export default function BacktestsPage() {
               </div>
             </div>
 
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="space-y-1">
+                <span className="text-xs text-gray-500">Position Mode</span>
+                <select
+                  value={positionMode}
+                  onChange={(e) => setPositionMode(e.target.value as 'NET' | 'HEDGE')}
+                  disabled={executionMode !== 'AGGRESSIVE'}
+                  className="w-full rounded-xl bg-gray-900 border border-gray-800 px-3 py-2.5 text-sm text-gray-100 disabled:opacity-60"
+                >
+                  <option value="NET">NET</option>
+                  <option value="HEDGE">HEDGE</option>
+                </select>
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs text-gray-500">Hedge overlap</span>
+                <select
+                  value={allowHedgeOpposition ? 'allow' : 'block'}
+                  onChange={(e) => setAllowHedgeOpposition(e.target.value === 'allow')}
+                  disabled={positionMode !== 'HEDGE' || executionMode !== 'AGGRESSIVE'}
+                  className="w-full rounded-xl bg-gray-900 border border-gray-800 px-3 py-2.5 text-sm text-gray-100 disabled:opacity-60"
+                >
+                  <option value="block">Block opposite overlap</option>
+                  <option value="allow">Allow LONG + SHORT</option>
+                </select>
+              </label>
+            </div>
+
             <div className="space-y-2">
               <span className="text-xs text-gray-500">Strategies</span>
               <div className="grid gap-2">
@@ -277,7 +323,7 @@ export default function BacktestsPage() {
           <div className="card">
             <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <h2 className="text-sm font-medium text-gray-300">Performance</h2>
-              <span className="badge-gray">{result ? `${selectedStrategyLabels} · ${executionMode}` : 'Awaiting run'}</span>
+              <span className="badge-gray">{result ? `${selectedStrategyLabels} · ${executionMode} · ${positionMode}` : 'Awaiting run'}</span>
             </div>
             {metrics ? (
               <div className="grid gap-3 grid-cols-2 xl:grid-cols-5">
@@ -289,6 +335,29 @@ export default function BacktestsPage() {
               </div>
             ) : (
               <p className="text-sm text-gray-500">Run a backtest to see metrics, equity curve, and trade summary.</p>
+            )}
+            {result?.strategy_breakdown && (
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                {Object.entries(result.strategy_breakdown).map(([key, item]: any) => (
+                  <div key={key} className="rounded-xl border border-gray-800 bg-gray-950/60 px-3 py-3">
+                    <div className="text-xs text-gray-500">{key}</div>
+                    <div className="mt-1 text-sm text-gray-100">Return {item.totalReturnPct}%</div>
+                    <div className="text-xs text-gray-400">Win rate {item.winRate}% · Max DD {item.maxDrawdown}%</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {result?.id && (
+              <div className="mt-4 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => deployMutation.mutate(result.id)}
+                  disabled={deployMutation.isPending}
+                  className="btn-primary"
+                >
+                  {deployMutation.isPending ? 'Deploying…' : 'Deploy this configuration'}
+                </button>
+              </div>
             )}
           </div>
 
@@ -349,7 +418,7 @@ export default function BacktestsPage() {
                 <div key={run.id} className="rounded-lg border border-gray-800 bg-gray-950/60 px-3 py-2">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <p className="text-sm text-gray-200">{run.asset} · {run.executionMode}</p>
+                      <p className="text-sm text-gray-200">{run.asset} · {run.executionMode} · {run.positionMode ?? 'NET'}</p>
                       <p className="text-xs text-gray-500">{(run.strategyKeys ?? []).join(', ')}</p>
                     </div>
                     <span className="text-xs text-gray-500">{run.status}</span>

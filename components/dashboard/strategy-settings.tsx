@@ -12,6 +12,18 @@ const MARKETS = [
 ] as const
 
 type MarketId = typeof MARKETS[number]['id']
+type RuntimeConfig = {
+  executionMode: 'SAFE' | 'AGGRESSIVE'
+  positionMode: 'NET' | 'HEDGE'
+  allowHedgeOpposition: boolean
+  conflictBlocking: boolean
+  maxPositionsPerSymbol: number
+  maxCapitalPerStrategyPct: number
+  maxDrawdownPct: number
+  strategyKeys: string[]
+  conflictWarnings?: Array<{ code: string; severity: 'info' | 'warning' | 'blocking'; message: string }>
+  exchangeCapabilities?: { supportsHedgeMode: boolean; effectivePositionMode: 'NET' | 'HEDGE'; warning?: string } | null
+}
 
 type StrategyItem = {
   strategyKey: string
@@ -36,7 +48,7 @@ function marketCategory(market: MarketId) {
 
 export function StrategySettings() {
   const qc = useQueryClient()
-  const [configs, setConfigs] = useState<Record<string, { executionMode: 'SAFE' | 'AGGRESSIVE'; strategyKeys: string[] }>>({})
+  const [configs, setConfigs] = useState<Record<string, RuntimeConfig>>({})
   const [savedMarket, setSavedMarket] = useState<string | null>(null)
 
   const { data: strategyData, isLoading: strategiesLoading } = useQuery({
@@ -57,11 +69,19 @@ export function StrategySettings() {
 
   useEffect(() => {
     if (configData?.markets) {
-      const next: Record<string, { executionMode: 'SAFE' | 'AGGRESSIVE'; strategyKeys: string[] }> = {}
+      const next: Record<string, RuntimeConfig> = {}
       for (const market of configData.markets) {
         next[market.marketType] = {
           executionMode: market.executionMode,
+          positionMode: market.positionMode ?? 'NET',
+          allowHedgeOpposition: market.allowHedgeOpposition ?? false,
+          conflictBlocking: market.conflictBlocking ?? false,
+          maxPositionsPerSymbol: market.maxPositionsPerSymbol ?? 2,
+          maxCapitalPerStrategyPct: market.maxCapitalPerStrategyPct ?? 25,
+          maxDrawdownPct: market.maxDrawdownPct ?? 12,
           strategyKeys: market.strategyKeys,
+          conflictWarnings: market.conflictWarnings ?? [],
+          exchangeCapabilities: market.exchangeCapabilities ?? null,
         }
       }
       setConfigs(next)
@@ -69,13 +89,29 @@ export function StrategySettings() {
   }, [configData])
 
   const saveMutation = useMutation({
-    mutationFn: async ({ marketType, config }: { marketType: MarketId; config: { executionMode: 'SAFE' | 'AGGRESSIVE'; strategyKeys: string[] } }) => {
+    mutationFn: async ({ marketType, config }: { marketType: MarketId; config: RuntimeConfig }) => {
+      const aggressiveConfirmed = config.executionMode !== 'AGGRESSIVE'
+        ? true
+        : window.confirm(
+          'AGGRESSIVE MODE ENABLED:\n\n- Strategies run independently\n- Higher risk and volatility\n- Opposite trades may occur (if hedge mode enabled)\n- Recommended for advanced users',
+        )
+      if (!aggressiveConfirmed) {
+        throw new Error('Aggressive mode confirmation is required before saving.')
+      }
+
       const res = await fetch('/api/strategy-config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           marketType,
           executionMode: config.executionMode,
+          positionMode: config.positionMode,
+          allowHedgeOpposition: config.allowHedgeOpposition,
+          conflictBlocking: config.conflictBlocking,
+          maxPositionsPerSymbol: config.maxPositionsPerSymbol,
+          maxCapitalPerStrategyPct: config.maxCapitalPerStrategyPct,
+          maxDrawdownPct: config.maxDrawdownPct,
+          aggressiveConfirmed,
           strategyKeys: config.strategyKeys,
         }),
       })
@@ -103,7 +139,16 @@ export function StrategySettings() {
 
   function toggleStrategy(marketType: MarketId, strategyKey: string) {
     setConfigs((prev) => {
-      const current = prev[marketType] ?? { executionMode: 'SAFE', strategyKeys: [] }
+      const current = prev[marketType] ?? {
+        executionMode: 'SAFE',
+        positionMode: 'NET',
+        allowHedgeOpposition: false,
+        conflictBlocking: false,
+        maxPositionsPerSymbol: 2,
+        maxCapitalPerStrategyPct: 25,
+        maxDrawdownPct: 12,
+        strategyKeys: [],
+      }
       const exists = current.strategyKeys.includes(strategyKey)
       const nextKeys = exists
         ? current.strategyKeys.filter((key) => key !== strategyKey)
@@ -117,6 +162,12 @@ export function StrategySettings() {
       ...prev,
       [marketType]: {
         executionMode,
+        positionMode: executionMode === 'SAFE' ? 'NET' : prev[marketType]?.positionMode ?? 'NET',
+        allowHedgeOpposition: executionMode === 'SAFE' ? false : prev[marketType]?.allowHedgeOpposition ?? false,
+        conflictBlocking: prev[marketType]?.conflictBlocking ?? false,
+        maxPositionsPerSymbol: prev[marketType]?.maxPositionsPerSymbol ?? 2,
+        maxCapitalPerStrategyPct: prev[marketType]?.maxCapitalPerStrategyPct ?? 25,
+        maxDrawdownPct: prev[marketType]?.maxDrawdownPct ?? 12,
         strategyKeys: prev[marketType]?.strategyKeys ?? [],
       },
     }))
@@ -149,7 +200,18 @@ export function StrategySettings() {
       )}
 
       {!strategiesLoading && !configsLoading && MARKETS.map((market) => {
-        const config = configs[market.id] ?? { executionMode: 'SAFE', strategyKeys: [] }
+        const config = configs[market.id] ?? {
+          executionMode: 'SAFE',
+          positionMode: 'NET',
+          allowHedgeOpposition: false,
+          conflictBlocking: false,
+          maxPositionsPerSymbol: 2,
+          maxCapitalPerStrategyPct: 25,
+          maxDrawdownPct: 12,
+          strategyKeys: [],
+          conflictWarnings: [],
+          exchangeCapabilities: null,
+        }
         const isAggressive = config.executionMode === 'AGGRESSIVE'
         return (
           <div key={market.id} className="rounded-2xl border border-gray-800 bg-gray-900/40 p-4 sm:p-5 space-y-4">
@@ -184,10 +246,97 @@ export function StrategySettings() {
             {isAggressive && (
               <div className="bg-red-950/30 border border-red-900/40 rounded-lg px-3 py-2.5 flex items-start gap-2.5">
                 <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
-                <p className="text-xs text-red-200/85">
-                  Aggressive mode is enabled. Strategies can open independent live positions for the same symbol,
-                  but opposite-direction overlap on one symbol is blocked for safety on netted exchange accounts.
-                </p>
+                <div className="space-y-1">
+                  <p className="text-xs text-red-200/85">
+                    AGGRESSIVE MODE ENABLED: strategies run independently, volatility is higher, and opposite trades may occur when hedge mode is active.
+                  </p>
+                  {config.exchangeCapabilities?.warning && (
+                    <p className="text-xs text-amber-300/85">{config.exchangeCapabilities.warning}</p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <label className="space-y-1">
+                <span className="text-xs text-gray-500">Position Mode</span>
+                <select
+                  disabled={botIsLocked || !isAggressive}
+                  value={config.positionMode}
+                  onChange={(e) => setConfigs((prev) => ({ ...prev, [market.id]: { ...config, positionMode: e.target.value as 'NET' | 'HEDGE' } }))}
+                  className="w-full rounded-xl bg-gray-900 border border-gray-800 px-3 py-2.5 text-sm text-gray-100 disabled:opacity-60"
+                >
+                  <option value="NET">NET</option>
+                  <option value="HEDGE">HEDGE</option>
+                </select>
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs text-gray-500">Max positions / symbol</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={10}
+                  disabled={botIsLocked}
+                  value={config.maxPositionsPerSymbol}
+                  onChange={(e) => setConfigs((prev) => ({ ...prev, [market.id]: { ...config, maxPositionsPerSymbol: Number(e.target.value) || 1 } }))}
+                  className="w-full rounded-xl bg-gray-900 border border-gray-800 px-3 py-2.5 text-sm text-gray-100"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs text-gray-500">Max capital / strategy %</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  disabled={botIsLocked}
+                  value={config.maxCapitalPerStrategyPct}
+                  onChange={(e) => setConfigs((prev) => ({ ...prev, [market.id]: { ...config, maxCapitalPerStrategyPct: Number(e.target.value) || 1 } }))}
+                  className="w-full rounded-xl bg-gray-900 border border-gray-800 px-3 py-2.5 text-sm text-gray-100"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs text-gray-500">Auto-stop drawdown %</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  disabled={botIsLocked}
+                  value={config.maxDrawdownPct}
+                  onChange={(e) => setConfigs((prev) => ({ ...prev, [market.id]: { ...config, maxDrawdownPct: Number(e.target.value) || 1 } }))}
+                  className="w-full rounded-xl bg-gray-900 border border-gray-800 px-3 py-2.5 text-sm text-gray-100"
+                />
+              </label>
+            </div>
+
+            <div className="flex flex-wrap gap-4 text-xs text-gray-400">
+              <label className="inline-flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={config.allowHedgeOpposition}
+                  disabled={botIsLocked || config.positionMode !== 'HEDGE'}
+                  onChange={(e) => setConfigs((prev) => ({ ...prev, [market.id]: { ...config, allowHedgeOpposition: e.target.checked } }))}
+                />
+                Allow LONG + SHORT simultaneously
+              </label>
+              <label className="inline-flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={config.conflictBlocking}
+                  disabled={botIsLocked}
+                  onChange={(e) => setConfigs((prev) => ({ ...prev, [market.id]: { ...config, conflictBlocking: e.target.checked } }))}
+                />
+                Block start when conflicts are detected
+              </label>
+            </div>
+
+            {(config.conflictWarnings?.length ?? 0) > 0 && (
+              <div className="rounded-xl border border-amber-900/30 bg-amber-950/20 p-3">
+                <p className="text-xs font-medium text-amber-300">Conflict warnings</p>
+                <div className="mt-2 space-y-1">
+                  {config.conflictWarnings?.map((warning) => (
+                    <p key={warning.code} className="text-xs text-amber-200/85">{warning.message}</p>
+                  ))}
+                </div>
               </div>
             )}
 

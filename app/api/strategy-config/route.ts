@@ -44,6 +44,13 @@ export async function PUT(req: NextRequest) {
       userId: session.id,
       marketType: parsed.data.marketType,
       executionMode: parsed.data.executionMode,
+      positionMode: parsed.data.positionMode,
+      allowHedgeOpposition: parsed.data.allowHedgeOpposition,
+      conflictBlocking: parsed.data.conflictBlocking,
+      aggressiveConfirmed: parsed.data.aggressiveConfirmed,
+      maxPositionsPerSymbol: parsed.data.maxPositionsPerSymbol,
+      maxCapitalPerStrategyPct: parsed.data.maxCapitalPerStrategyPct,
+      maxDrawdownPct: parsed.data.maxDrawdownPct,
       strategyKeys: parsed.data.strategyKeys,
     })
 

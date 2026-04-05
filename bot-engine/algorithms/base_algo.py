@@ -93,6 +93,9 @@ class BaseAlgo(ABC):
         session_ref: str = "",
         position_scope_key: str = "default",
         strategy_key: Optional[str] = None,
+        execution_mode: str = "SAFE",
+        position_mode: str = "NET",
+        allow_hedge_opposition: bool = False,
     ):
         self.connector    = connector
         self.risk         = risk_mgr
@@ -102,6 +105,9 @@ class BaseAlgo(ABC):
         self._session_ref = session_ref
         self.position_scope_key = position_scope_key
         self.strategy_key = strategy_key
+        self.execution_mode = execution_mode
+        self.position_mode = position_mode
+        self.allow_hedge_opposition = allow_hedge_opposition
 
         self._reconciled  = False
         self._risk_loaded = False
@@ -343,12 +349,32 @@ class BaseAlgo(ABC):
                 logger.info(f"[{self.name}] ⛔ {symbol}: stop mode activated mid-cycle — blocking entry")
                 return
 
-            can_trade, reason = self.risk.can_trade(balance)
-            if not can_trade:
-                logger.info(f"[{self.name}] ⛔ {symbol}: {reason}")
-                return
+            open_trades_for_symbol = await self.db.get_open_trades_for_symbol(
+                self.user_id, self.market_type, symbol
+            )
 
-            await self.db.save_signal(self.user_id, self.name, self.market_type, symbol, signal)
+            if self.position_mode == "NET":
+                opposite_trades = [
+                    trade for trade in open_trades_for_symbol
+                    if str(trade["position_scope_key"]) != self.position_scope_key
+                    and str(trade["side"]).upper() != signal
+                ]
+                if opposite_trades:
+                    logger.info(
+                        f"[{self.name}] ↔️  NET mode reversing {symbol}: "
+                        f"closing {len(opposite_trades)} opposite scoped position(s) first"
+                    )
+                    for trade in opposite_trades:
+                        await self._close_trade(
+                            symbol=symbol,
+                            exit_signal=signal,
+                            trade_id=str(trade["id"]),
+                            entry_price=float(trade["entry_price"]),
+                            original_side=str(trade["side"]),
+                            balance=balance,
+                            position_scope_key=str(trade["position_scope_key"]),
+                        )
+                    return
 
             ticker = await self.connector.fetch_ticker(symbol)
             price  = ticker.get("last")
@@ -360,6 +386,23 @@ class BaseAlgo(ABC):
             if quantity <= 0:
                 logger.warning(f"[{self.name}] ❌ Invalid qty for {symbol}")
                 return
+
+            strategy_exposure = await self.db.get_open_strategy_exposure(
+                self.user_id, self.market_type, self.strategy_key,
+            )
+            proposed_notional = float(quantity * price)
+            strategy_capital_pct = ((strategy_exposure + proposed_notional) / balance * 100) if balance > 0 else 0.0
+            can_trade, reason = self.risk.can_open_position(
+                balance=balance,
+                position_count_for_symbol=len(open_trades_for_symbol),
+                strategy_capital_pct=strategy_capital_pct,
+                drawdown_pct=max(0.0, abs(self.risk.daily_loss) / balance * 100) if balance > 0 else 0.0,
+            )
+            if not can_trade:
+                logger.info(f"[{self.name}] ⛔ {symbol}: {reason}")
+                return
+
+            await self.db.save_signal(self.user_id, self.name, self.market_type, symbol, signal)
 
             if self._paper_mode:
                 trade_id = await self.db.save_paper_trade(
@@ -399,13 +442,14 @@ class BaseAlgo(ABC):
     async def _close_trade(
         self, symbol: str, exit_signal: str, trade_id: str,
         entry_price: float, original_side: str, balance: float,
+        position_scope_key: Optional[str] = None,
     ):
         if hasattr(self, "_open_positions"):
             self._open_positions.pop(symbol, None)
 
         try:
             open_row = await self.db.get_open_trade(
-                self.user_id, symbol, self.market_type, self.position_scope_key
+                self.user_id, symbol, self.market_type, position_scope_key or self.position_scope_key
             )
             if not open_row:
                 logger.info(f"[{self.name}] ℹ️  {symbol} already closed in DB, skipping close")

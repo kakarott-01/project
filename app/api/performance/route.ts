@@ -2,7 +2,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
-import { trades } from '@/lib/schema'
+import { backtestRuns, trades } from '@/lib/schema'
 import { eq, and, sql, gte } from 'drizzle-orm'
 
 export async function GET(req: NextRequest) {
@@ -105,6 +105,47 @@ export async function GET(req: NextRequest) {
     }
   })
 
+  const byStrategy = await db
+    .select({
+      strategyKey: trades.strategyKey,
+      market: trades.marketType,
+      total: sql<number>`count(*)::int`,
+      closed: sql<number>`count(*) filter (where status = 'closed')::int`,
+      winners: sql<number>`count(*) filter (where status = 'closed' and coalesce(net_pnl, pnl) > 0)::int`,
+      pnl: sql<number>`coalesce(sum(coalesce(net_pnl, pnl)) filter (where status = 'closed'), 0)::float`,
+      unrealizedPnl: sql<number>`coalesce(sum(
+        case when status = 'open' then coalesce(net_pnl, pnl, 0) else 0 end
+      ), 0)::float`,
+    })
+    .from(trades)
+    .where(and(...conditions, sql`${trades.strategyKey} is not null`))
+    .groupBy(trades.strategyKey, trades.marketType)
+
+  const latestBacktests = await db.query.backtestRuns.findMany({
+    where: eq(backtestRuns.userId, session.id),
+    orderBy: (table, { desc }) => [desc(table.completedAt), desc(table.createdAt)],
+    columns: {
+      marketType: true,
+      strategyKeys: true,
+      performanceMetrics: true,
+      completedAt: true,
+    },
+    limit: 50,
+  })
+
+  const backtestByKey = new Map<string, any>()
+  for (const run of latestBacktests) {
+    for (const strategyKey of run.strategyKeys ?? []) {
+      const key = `${run.marketType}:${strategyKey}`
+      if (!backtestByKey.has(key)) {
+        backtestByKey.set(key, {
+          metrics: run.performanceMetrics ?? null,
+          completedAt: run.completedAt,
+        })
+      }
+    }
+  }
+
   return NextResponse.json({
     summary: {
       total:       summary.total,
@@ -125,6 +166,12 @@ export async function GET(req: NextRequest) {
     },
     dailyPnl,
     byMarket,
+    byStrategy: byStrategy.map((row) => ({
+      ...row,
+      strategyKey: row.strategyKey,
+      winRate: row.closed > 0 ? Math.round((row.winners / row.closed) * 10000) / 100 : 0,
+      liveVsBacktest: backtestByKey.get(`${row.market}:${row.strategyKey}`) ?? null,
+    })),
     cumPnl,
   })
 }

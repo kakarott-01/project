@@ -4,6 +4,13 @@ import { PUBLIC_STRATEGY_CATALOG, mapPlatformMarketToStrategyMarket } from './ca
 export const strategyConfigSchema = z.object({
   marketType: z.enum(['indian', 'crypto', 'commodities', 'global']),
   executionMode: z.enum(['SAFE', 'AGGRESSIVE']).default('SAFE'),
+  positionMode: z.enum(['NET', 'HEDGE']).default('NET'),
+  allowHedgeOpposition: z.boolean().default(false),
+  conflictBlocking: z.boolean().default(false),
+  aggressiveConfirmed: z.boolean().default(false),
+  maxPositionsPerSymbol: z.number().int().min(1).max(10).default(2),
+  maxCapitalPerStrategyPct: z.number().min(1).max(100).default(25),
+  maxDrawdownPct: z.number().min(1).max(100).default(12),
   strategyKeys: z.array(z.string().min(1)).min(1).max(2),
 })
 
@@ -15,6 +22,8 @@ export const backtestRequestSchema = z.object({
   dateTo: z.string().datetime(),
   initialCapital: z.number().positive(),
   executionMode: z.enum(['SAFE', 'AGGRESSIVE']).default('SAFE'),
+  positionMode: z.enum(['NET', 'HEDGE']).default('NET'),
+  allowHedgeOpposition: z.boolean().default(false),
   strategyKeys: z.array(z.string().min(1)).min(1).max(2),
   comparisonLabel: z.string().max(150).optional(),
 })
