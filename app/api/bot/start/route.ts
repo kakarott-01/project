@@ -17,6 +17,7 @@ import { db } from '@/lib/db'
 import { botStatuses, botSessions, exchangeApis, marketConfigs } from '@/lib/schema'
 import { eq, and, inArray } from 'drizzle-orm'
 import { acquireBotLock } from '@/lib/bot-lock'
+import { getUserMarketStrategyConfig } from '@/lib/strategies/config-service'
 
 type MarketName = 'indian' | 'crypto' | 'commodities' | 'global'
 
@@ -136,6 +137,16 @@ export async function POST(req: NextRequest) {
     }
 
     const now = new Date()
+
+    for (const market of markets) {
+      const strategyConfig = await getUserMarketStrategyConfig(session.id, market)
+      if (strategyConfig.strategyKeys.length === 0) {
+        return NextResponse.json(
+          { error: `No strategy configured for ${market}. Configure at least one strategy before starting.` },
+          { status: 400 },
+        )
+      }
+    }
 
     // ── Create sessions BEFORE calling the engine ─────────────────────────────
     const sessionIds: Record<string, string> = {}

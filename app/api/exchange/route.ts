@@ -5,6 +5,7 @@ import { exchangeApis, marketConfigs } from '@/lib/schema'
 import { encrypt, encryptJSON } from '@/lib/encryption'
 import { eq, and } from 'drizzle-orm'
 import { z } from 'zod'
+import { assertBotStoppedForSensitiveMutation } from '@/lib/strategies/locks'
 
 const saveSchema = z.object({
   marketType: z.enum(['indian', 'crypto', 'commodities', 'global']),
@@ -29,6 +30,12 @@ export async function POST(req: NextRequest) {
   }
 
   const { marketType, exchangeName, exchangeLabel, apiKey, apiSecret, extraFields } = parsed.data
+
+  try {
+    await assertBotStoppedForSensitiveMutation(session.id, 'Stop the bot before editing API credentials or market wiring.')
+  } catch (error) {
+    return NextResponse.json({ error: (error as Error).message }, { status: (error as Error & { status?: number }).status ?? 409 })
+  }
 
   const apiKeyEnc = encrypt(apiKey)
   const apiSecretEnc = encrypt(apiSecret)

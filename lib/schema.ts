@@ -14,6 +14,11 @@ export const signalEnum           = pgEnum('signal_type', ['buy', 'sell', 'hold'
 export const tradingModeEnum      = pgEnum('trading_mode', ['paper', 'live'])
 export const botSessionStatusEnum = pgEnum('bot_session_status', ['running', 'stopped', 'error'])
 export const closeLogStatusEnum   = pgEnum('close_log_status', ['pending', 'filled', 'partial', 'failed'])
+export const strategyRiskLevelEnum = pgEnum('strategy_risk_level', ['LOW', 'MEDIUM', 'HIGH'])
+export const strategyMarketEnum    = pgEnum('strategy_market_enum', ['CRYPTO', 'STOCKS', 'FOREX'])
+export const strategyExecutionModeEnum = pgEnum('strategy_execution_mode', ['SAFE', 'AGGRESSIVE'])
+export const strategyConfigSlotEnum = pgEnum('strategy_config_slot', ['PRIMARY', 'SECONDARY'])
+export const backtestStatusEnum    = pgEnum('backtest_status', ['queued', 'completed', 'failed'])
 
 // ─── Users ────────────────────────────────────────────────────────────────────
 export const users = pgTable('users', {
@@ -74,6 +79,73 @@ export const marketConfigs = pgTable('market_configs', {
   updatedAt:  timestamp('updated_at').defaultNow().notNull(),
 }, (t) => ({
   userMarketIdx: index('market_configs_user_market_idx').on(t.userId, t.marketType),
+}))
+
+// ─── Strategy Catalog ────────────────────────────────────────────────────────
+export const strategies = pgTable('strategies', {
+  id:                uuid('id').defaultRandom().primaryKey(),
+  strategyKey:       varchar('strategy_key', { length: 100 }).notNull().unique(),
+  name:              varchar('name', { length: 120 }).notNull().unique(),
+  description:       text('description').notNull(),
+  riskLevel:         strategyRiskLevelEnum('risk_level').notNull(),
+  supportedMarkets:  jsonb('supported_markets').$type<Array<'CRYPTO' | 'STOCKS' | 'FOREX'>>().notNull(),
+  supportedTimeframes: jsonb('supported_timeframes').$type<string[]>().notNull(),
+  historicalWinRate: decimal('historical_win_rate', { precision: 6, scale: 2 }).notNull(),
+  historicalAvgReturn: decimal('historical_avg_return', { precision: 10, scale: 4 }).notNull(),
+  historicalMaxDrawdown: decimal('historical_max_drawdown', { precision: 10, scale: 4 }).notNull(),
+  historicalSharpeRatio: decimal('historical_sharpe_ratio', { precision: 10, scale: 4 }).notNull(),
+  isActive:          boolean('is_active').default(true).notNull(),
+  createdAt:         timestamp('created_at').defaultNow().notNull(),
+  updatedAt:         timestamp('updated_at').defaultNow().notNull(),
+}, (t) => ({
+  keyIdx: index('strategies_key_idx').on(t.strategyKey),
+  activeIdx: index('strategies_active_idx').on(t.isActive),
+}))
+
+export const marketStrategyConfigs = pgTable('market_strategy_configs', {
+  id:            uuid('id').defaultRandom().primaryKey(),
+  userId:        uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  marketType:    marketTypeEnum('market_type').notNull(),
+  executionMode: strategyExecutionModeEnum('execution_mode').default('SAFE').notNull(),
+  createdAt:     timestamp('created_at').defaultNow().notNull(),
+  updatedAt:     timestamp('updated_at').defaultNow().notNull(),
+}, (t) => ({
+  userMarketIdx: index('market_strategy_configs_user_market_idx').on(t.userId, t.marketType),
+}))
+
+export const marketStrategySelections = pgTable('market_strategy_selections', {
+  id:         uuid('id').defaultRandom().primaryKey(),
+  configId:   uuid('config_id').references(() => marketStrategyConfigs.id, { onDelete: 'cascade' }).notNull(),
+  strategyId: uuid('strategy_id').references(() => strategies.id, { onDelete: 'cascade' }).notNull(),
+  slot:       strategyConfigSlotEnum('slot').notNull(),
+  createdAt:  timestamp('created_at').defaultNow().notNull(),
+}, (t) => ({
+  configSlotIdx: index('market_strategy_selections_config_slot_idx').on(t.configId, t.slot),
+  strategyIdx: index('market_strategy_selections_strategy_idx').on(t.strategyId),
+}))
+
+export const backtestRuns = pgTable('backtest_runs', {
+  id:                 uuid('id').defaultRandom().primaryKey(),
+  userId:             uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  marketType:         marketTypeEnum('market_type').notNull(),
+  asset:              varchar('asset', { length: 100 }).notNull(),
+  timeframe:          varchar('timeframe', { length: 20 }).notNull(),
+  dateFrom:           timestamp('date_from').notNull(),
+  dateTo:             timestamp('date_to').notNull(),
+  initialCapital:     decimal('initial_capital', { precision: 20, scale: 2 }).notNull(),
+  strategyKeys:       jsonb('strategy_keys').$type<string[]>().notNull(),
+  executionMode:      strategyExecutionModeEnum('execution_mode').notNull(),
+  status:             backtestStatusEnum('status').default('queued').notNull(),
+  performanceMetrics: jsonb('performance_metrics'),
+  equityCurve:        jsonb('equity_curve'),
+  tradeSummary:       jsonb('trade_summary'),
+  comparisonLabel:    varchar('comparison_label', { length: 150 }),
+  errorMessage:       text('error_message'),
+  createdAt:          timestamp('created_at').defaultNow().notNull(),
+  completedAt:        timestamp('completed_at'),
+}, (t) => ({
+  userCreatedIdx: index('backtest_runs_user_created_idx').on(t.userId, t.createdAt),
+  statusIdx: index('backtest_runs_status_idx').on(t.status),
 }))
 
 // ─── Exchange APIs ─────────────────────────────────────────────────────────────
@@ -299,9 +371,11 @@ export const reconciliationLog = pgTable('reconciliation_log', {
 export const usersRelations = relations(users, ({ many, one }) => ({
   sessions:           many(sessions),
   marketConfigs:      many(marketConfigs),
+  marketStrategyConfigs: many(marketStrategyConfigs),
   exchangeApis:       many(exchangeApis),
   trades:             many(trades),
   algoSignals:        many(algoSignals),
+  backtestRuns:       many(backtestRuns),
   modeAuditLogs:      many(modeAuditLogs),
   botSessions:        many(botSessions),
   positionCloseLogs:  many(positionCloseLog),
@@ -315,6 +389,20 @@ export const usersRelations = relations(users, ({ many, one }) => ({
 export const botSessionsRelations = relations(botSessions, ({ one, many }) => ({
   user:   one(users, { fields: [botSessions.userId], references: [users.id] }),
   trades: many(trades),
+}))
+
+export const marketStrategyConfigsRelations = relations(marketStrategyConfigs, ({ one, many }) => ({
+  user: one(users, { fields: [marketStrategyConfigs.userId], references: [users.id] }),
+  selections: many(marketStrategySelections),
+}))
+
+export const marketStrategySelectionsRelations = relations(marketStrategySelections, ({ one }) => ({
+  config: one(marketStrategyConfigs, { fields: [marketStrategySelections.configId], references: [marketStrategyConfigs.id] }),
+  strategy: one(strategies, { fields: [marketStrategySelections.strategyId], references: [strategies.id] }),
+}))
+
+export const backtestRunsRelations = relations(backtestRuns, ({ one }) => ({
+  user: one(users, { fields: [backtestRuns.userId], references: [users.id] }),
 }))
 
 export const tradesRelations = relations(trades, ({ one, many }) => ({
@@ -334,6 +422,9 @@ export type NewUser           = typeof users.$inferInsert
 export type AccessCode        = typeof accessCodes.$inferSelect
 export type Session           = typeof sessions.$inferSelect
 export type MarketConfig      = typeof marketConfigs.$inferSelect
+export type Strategy         = typeof strategies.$inferSelect
+export type MarketStrategyConfig = typeof marketStrategyConfigs.$inferSelect
+export type MarketStrategySelection = typeof marketStrategySelections.$inferSelect
 export type ExchangeApi       = typeof exchangeApis.$inferSelect
 export type Trade             = typeof trades.$inferSelect
 export type NewTrade          = typeof trades.$inferInsert
@@ -349,3 +440,4 @@ export type FailedLiveOrder   = typeof failedLiveOrders.$inferSelect
 export type RiskState         = typeof riskState.$inferSelect
 export type ReconciliationLog = typeof reconciliationLog.$inferSelect
 export type StopMode          = 'close_all' | 'graceful'
+export type BacktestRun       = typeof backtestRuns.$inferSelect

@@ -172,6 +172,17 @@ class DrainRequest(BaseModel):
 class CloseAllRequest(BaseModel):
     user_id: str
 
+class BacktestRequest(BaseModel):
+    user_id: str
+    market_type: str
+    asset: str
+    timeframe: str
+    date_from: str
+    date_to: str
+    initial_capital: float
+    execution_mode: str
+    strategy_keys: List[str]
+
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
@@ -255,3 +266,50 @@ async def bot_status(user_id: str):
     if not _scheduler:
         raise HTTPException(500, "Scheduler not initialized")
     return _scheduler.get_status(user_id)
+
+
+@app.post("/backtests/run", dependencies=[Depends(_verify)])
+async def run_backtest_endpoint(req: BacktestRequest):
+    from datetime import datetime, timezone
+
+    from exchange_connector import ExchangeConnector
+    from strategy_engine import run_backtest, timeframe_to_millis
+
+    if not _db:
+        raise HTTPException(500, "Database not initialized")
+
+    exchange_configs = await _db.get_exchange_apis(req.user_id)
+    cfg = exchange_configs.get(req.market_type)
+    if not cfg:
+        raise HTTPException(400, f"No exchange API configured for market {req.market_type}")
+
+    connector = ExchangeConnector(
+        exchange_name=cfg["exchange_name"],
+        api_key=cfg["api_key"],
+        api_secret=cfg["api_secret"],
+        extra=cfg.get("extra", {}),
+        market_type=req.market_type,
+    )
+
+    try:
+        start = datetime.fromisoformat(req.date_from.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(req.date_to.replace("Z", "+00:00"))
+        if end <= start:
+            raise HTTPException(400, "date_to must be after date_from")
+
+        candle_ms = timeframe_to_millis(req.timeframe)
+        limit = min(max(int(((end - start).total_seconds() * 1000) / candle_ms) + 5, 100), 2000)
+        since_ms = int(start.replace(tzinfo=timezone.utc).timestamp() * 1000)
+        df = await connector.fetch_ohlcv(req.asset, req.timeframe, limit=limit, since_ms=since_ms)
+        result = run_backtest(
+            df=df,
+            strategy_keys=req.strategy_keys,
+            execution_mode=req.execution_mode,
+            initial_capital=req.initial_capital,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"backtest failed user={req.user_id}: {e}", exc_info=True)
+        raise HTTPException(500, str(e))

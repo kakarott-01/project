@@ -222,6 +222,28 @@ class Database:
             result[market] = (row["mode"] == "paper") if row["mode"] else bool(row["paper_mode"])
         return result
 
+    async def get_market_strategy_config(self, user_id: str, market_type: str) -> Dict[str, Any]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """
+            SELECT c.execution_mode, s.strategy_key, sel.slot
+            FROM market_strategy_configs c
+            LEFT JOIN market_strategy_selections sel ON sel.config_id = c.id
+            LEFT JOIN strategies s ON s.id = sel.strategy_id
+            WHERE c.user_id=$1 AND c.market_type=$2
+            ORDER BY sel.slot ASC
+            """,
+            user_id, market_type,
+        )
+        if not rows:
+            return {"execution_mode": "SAFE", "strategy_keys": []}
+
+        strategy_keys = [row["strategy_key"] for row in rows if row["strategy_key"]]
+        return {
+            "execution_mode": rows[0]["execution_mode"] or "SAFE",
+            "strategy_keys": strategy_keys,
+        }
+
     async def get_risk_settings(self, user_id: str) -> Dict:
         pool = await self.pool()
         row  = await pool.fetchrow("SELECT * FROM risk_settings WHERE user_id=$1", user_id)

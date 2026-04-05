@@ -149,10 +149,11 @@ class ExchangeConnector:
         symbol: str,
         timeframe: str = "15m",
         limit: int = 100,
+        since_ms: Optional[int] = None,
     ) -> pd.DataFrame:
         async with self._exchange() as ex:
             try:
-                raw = await ex.fetch_ohlcv(symbol, timeframe, limit=limit)
+                raw = await ex.fetch_ohlcv(symbol, timeframe, since=since_ms, limit=limit)
                 if not raw:
                     raise ValueError(f"Empty OHLCV for {symbol}")
                 df = pd.DataFrame(

@@ -36,19 +36,9 @@ from db import Database
 from exchange_connector import ExchangeConnector, clear_ohlcv_cache
 from risk_manager import RiskManager
 from close_all_engine import CloseAllEngine
-from algorithms.crypto import CryptoAlgo
-from algorithms.indian_markets import IndianMarketsAlgo
-from algorithms.commodities import CommoditiesAlgo
-from algorithms.global_general import GlobalAlgo
+from configured_algo import ConfiguredMultiStrategyAlgo
 
 logger = logging.getLogger(__name__)
-
-ALGO_MAP = {
-    "indian":      IndianMarketsAlgo,
-    "crypto":      CryptoAlgo,
-    "commodities": CommoditiesAlgo,
-    "global":      GlobalAlgo,
-}
 
 MARKET_INTERVAL = {
     "indian":      60,
@@ -169,8 +159,6 @@ class BotScheduler:
                 ctx.connectors[market] = connector
 
                 paper_mode = market_modes.get(market, True)
-                AlgoClass  = ALGO_MAP.get(market, GlobalAlgo)
-
                 real_session_id = (session_ids or {}).get(market)
                 session_ref     = real_session_id if real_session_id else f"{user_id}:{market}"
 
@@ -187,13 +175,14 @@ class BotScheduler:
                         "Starting with zero values."
                     )
 
-                algo = AlgoClass(
+                algo = ConfiguredMultiStrategyAlgo(
                     connector=connector,
                     risk_mgr=risk_mgr,
                     db=self._db,
                     user_id=user_id,
                     paper_mode=paper_mode,
                     session_ref=session_ref,
+                    market_type_name=market,
                 )
                 # Mark risk as already loaded so base_algo doesn't reload on first cycle
                 algo._risk_loaded = True
@@ -276,7 +265,7 @@ class BotScheduler:
                 ctx.job_ids.append(job_id)
                 started_markets.append(market)
                 logger.info(
-                    f"✅ Scheduled {AlgoClass.__name__} market={market} "
+                    f"✅ Scheduled {ConfiguredMultiStrategyAlgo.__name__} market={market} "
                     f"every {interval}s [{'PAPER' if paper_mode else '🔴 LIVE'}] "
                     f"session_ref={session_ref}"
                 )
