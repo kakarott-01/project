@@ -8,6 +8,7 @@ import { InlineAlert } from '@/components/ui/inline-alert'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { InfoTip } from '@/components/ui/tooltip'
 import { useToastStore } from '@/lib/toast-store'
+import { isBotLocked } from '@/lib/bot-lock'
 
 const MARKETS = [
   { id: 'crypto', label: 'Crypto', publicLabel: 'CRYPTO' },
@@ -303,7 +304,7 @@ export function StrategySettings() {
   })
 
   const strategies: StrategyItem[] = strategyData?.strategies ?? []
-  const botIsLocked = botData?.status === 'running' || botData?.status === 'stopping'
+  // const botIsLocked = botData?.status === 'running' || botData?.status === 'stopping'
   const activeMarkets: string[] = botData?.activeMarkets ?? []
   const totalCapital = Number(riskData?.paperBalance ?? 10000)
   const strategiesByMarket = useMemo(() => {
@@ -403,7 +404,7 @@ export function StrategySettings() {
           Global Risk Controls are hard limits. Strategy Allocation is a soft layer per market, and AGGRESSIVE mode enforces per-strategy capital splits before global checks approve the final order.
         </InlineAlert>
 
-        {botIsLocked ? (
+        {activeMarkets.length > 0 ? (
           <InlineAlert tone="warning" title="Strategy edits are locked while the bot is active.">
             Stop or fully drain active sessions before changing market-level strategy settings.
           </InlineAlert>
@@ -491,7 +492,7 @@ export function StrategySettings() {
                           <button
                             key={mode}
                             type="button"
-                            disabled={botIsLocked}
+                            disabled={isBotActiveHere}
                             onClick={() => updateMarket(market.id, (current) => ({
                               ...current,
                               executionMode: mode,
@@ -527,7 +528,7 @@ export function StrategySettings() {
                             value={config.maxPositionsPerSymbol}
                             min={1}
                             max={10}
-                            disabled={botIsLocked}
+                            disabled={isBotActiveHere}
                             onChange={(value) => updateMarket(market.id, (current) => ({ ...current, maxPositionsPerSymbol: value }))}
                           />
                           <NumberField
@@ -537,7 +538,7 @@ export function StrategySettings() {
                             min={1}
                             max={100}
                             suffix="%"
-                            disabled={botIsLocked}
+                            disabled={isBotActiveHere}
                             onChange={(value) => updateMarket(market.id, (current) => ({ ...current, maxCapitalPerStrategyPct: value }))}
                           />
                         </div>
@@ -549,7 +550,7 @@ export function StrategySettings() {
                               <InfoTip text="NET keeps one net position per symbol. HEDGE allows opposing exposure if the exchange supports it." />
                             </span>
                             <select
-                              disabled={botIsLocked || !isAggressive}
+                              disabled={isBotActiveHere || !isAggressive}
                               value={config.positionMode}
                               onChange={(event) => updateMarket(market.id, (current) => ({ ...current, positionMode: event.target.value as 'NET' | 'HEDGE' }))}
                               className="w-full rounded-xl border border-gray-800 bg-gray-900 px-3 py-2.5 text-sm text-gray-100 disabled:opacity-60"
@@ -565,7 +566,7 @@ export function StrategySettings() {
                             min={1}
                             max={100}
                             suffix="%"
-                            disabled={botIsLocked}
+                            disabled={isBotActiveHere}
                             onChange={(value) => updateMarket(market.id, (current) => ({ ...current, maxDrawdownPct: value }))}
                           />
                           <div className="rounded-2xl border border-gray-800 bg-gray-950/50 p-4">
@@ -580,7 +581,7 @@ export function StrategySettings() {
                             <input
                               type="checkbox"
                               checked={config.allowHedgeOpposition}
-                              disabled={botIsLocked || config.positionMode !== 'HEDGE'}
+                              disabled={isBotActiveHere || config.positionMode !== 'HEDGE'}
                               onChange={(event) => updateMarket(market.id, (current) => ({ ...current, allowHedgeOpposition: event.target.checked }))}
                             />
                             Allow LONG + SHORT simultaneously
@@ -589,7 +590,7 @@ export function StrategySettings() {
                             <input
                               type="checkbox"
                               checked={config.conflictBlocking}
-                              disabled={botIsLocked}
+                              disabled={isBotActiveHere}
                               onChange={(event) => updateMarket(market.id, (current) => ({ ...current, conflictBlocking: event.target.checked }))}
                             />
                             Block start when conflicts are detected
@@ -663,7 +664,7 @@ export function StrategySettings() {
                             <button
                               key={strategy.strategyKey}
                               type="button"
-                              disabled={botIsLocked || (!selected && config.strategyKeys.length >= 2)}
+                              disabled={isBotActiveHere || (!selected && config.strategyKeys.length >= 2)}
                               onClick={() => toggleStrategy(market.id, strategy.strategyKey)}
                               className={`rounded-2xl border p-4 text-left transition ${
                                 selected
@@ -707,7 +708,7 @@ export function StrategySettings() {
                                     <InfoTip text="Higher-priority strategies can reserve room when capital is tight in AGGRESSIVE mode." />
                                   </span>
                                   <select
-                                    disabled={botIsLocked}
+                                    disabled={isBotActiveHere}
                                     value={settings.priority}
                                     onChange={(event) => updateMarket(market.id, (current) => ({
                                       ...current,
@@ -730,7 +731,7 @@ export function StrategySettings() {
                                   min={0}
                                   max={86400}
                                   suffix="s"
-                                  disabled={botIsLocked}
+                                  disabled={isBotActiveHere}
                                   onChange={(value) => updateMarket(market.id, (current) => ({
                                     ...current,
                                     strategySettings: {
@@ -747,7 +748,7 @@ export function StrategySettings() {
                                   max={100}
                                   step={0.1}
                                   suffix="%"
-                                  disabled={botIsLocked || !isAggressive}
+                                  disabled={isBotActiveHere || !isAggressive}
                                   onChange={(value) => updateMarket(market.id, (current) => ({
                                     ...current,
                                     strategySettings: {
@@ -767,7 +768,7 @@ export function StrategySettings() {
                                   max={100}
                                   step={0.1}
                                   suffix="%"
-                                  disabled={botIsLocked || !isAggressive}
+                                  disabled={isBotActiveHere || !isAggressive}
                                   onChange={(value) => updateMarket(market.id, (current) => ({
                                     ...current,
                                     strategySettings: {
@@ -789,7 +790,7 @@ export function StrategySettings() {
                                   min={0}
                                   max={100}
                                   suffix="%"
-                                  disabled={botIsLocked}
+                                  disabled={isBotActiveHere}
                                   onChange={(value) => updateMarket(market.id, (current) => ({
                                     ...current,
                                     strategySettings: {
@@ -809,7 +810,7 @@ export function StrategySettings() {
                                   max={100}
                                   suffix="%"
                                   step={0.1}
-                                  disabled={botIsLocked}
+                                  disabled={isBotActiveHere}
                                   onChange={(value) => updateMarket(market.id, (current) => ({
                                     ...current,
                                     strategySettings: {
@@ -827,7 +828,7 @@ export function StrategySettings() {
                                   value={settings.health.maxLossStreak}
                                   min={1}
                                   max={100}
-                                  disabled={botIsLocked}
+                                  disabled={isBotActiveHere}
                                   onChange={(value) => updateMarket(market.id, (current) => ({
                                     ...current,
                                     strategySettings: {
@@ -859,7 +860,7 @@ export function StrategySettings() {
                       </div>
                       <Button
                         onClick={() => handleSave(market.id, config)}
-                        disabled={botIsLocked || saveMutation.isPending || config.strategyKeys.length === 0}
+                        disabled={isBotActiveHere || saveMutation.isPending || config.strategyKeys.length === 0}
                       >
                         {savingMarket === market.id ? (
                           <><Loader2 className="h-4 w-4 animate-spin" />Saving…</>
