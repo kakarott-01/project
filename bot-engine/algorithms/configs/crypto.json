@@ -1,42 +1,45 @@
 {
-  "algo_name": "Multi-TF RSI + Bollinger Bands",
+  "algo_name": "Crypto Confidence-Leverage Engine v4",
   "enabled": true,
   "paper_mode": true,
   "quote_currency": "USDT",
   "fee_rate": 0.001,
+
   "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
   "timeframe": "15m",
   "trend_timeframe": "4h",
   "signal_cooldown_minutes": 15,
-  "stop_loss_pct": 1.5,
-  "take_profit_pct": 3.0,
-  "indicators": {
-    "rsi": {
-      "period": 14,
-      "oversold": 32,
-      "overbought": 68,
-      "trend_buy_zone": [35, 52],
-      "trend_sell_zone": [48, 62]
-    },
-    "bb": {
-      "length": 20,
-      "std": 2.0
-    },
-    "ema_fast": {
-      "period": 9
-    },
-    "ema_slow": {
-      "period": 21
-    },
-    "ema_trend": {
-      "period": 200,
-      "timeframe": "4h"
-    }
+
+  "_comment_risk": "Risk management — all monetary values as % of balance",
+  "risk_pct_per_trade": 1.0,
+  "stop_loss_pct": 100.0,
+  "take_profit_pct": 200.0,
+  "max_open_trades": 3,
+  "daily_loss_limit_pct": 3.0,
+
+  "_comment_leverage": "Leverage is determined dynamically from confidence score",
+  "_leverage_map": {
+    "score_80_plus": "10x",
+    "score_65_plus": "7x",
+    "score_50_plus": "5x",
+    "score_40_plus": "3x",
+    "score_below_40": "NO TRADE"
   },
+
+  "_comment_confidence": "Minimum confidence score to enter a trade",
+  "min_confidence": 40.0,
+
+  "_comment_strategy": "Strategy selection — multi-strategy engine",
+  "scalp_enabled": false,
+
+  "_comment_hold": "Hold time by confidence: >=80 → 12h, >=60 → 6h, >=40 → 3h",
+
   "exit_rules": {
-    "time_limit_hours": 2,
-    "rsi_peak_exit": 62,
-    "rsi_retreat_exit": 58
+    "time_limit_multiplier": 1.0,
+    "rsi_overbought_exit": 68,
+    "rsi_oversold_exit": 32,
+    "use_tp_sl": true
   },
-  "notes": "Dual-mode: trend-following (EMA200 4h) + mean-reversion (BB squeeze). 2-candle RSI confirmation for mean-rev. 15m cooldown. Full TP/SL/RSI/time exit logic. Restart-safe: restores open positions from DB."
+
+  "notes": "v4: Confidence engine (0-100) drives leverage (3x-10x). Multi-strategy: pullback+breakout+scalp (scalp disabled). Market regime detection routes to correct sub-strategy. Risk: 1% per trade, max 3 concurrent, -3% daily cap. Paper mode uses identical leverage math. BingX: isolated margin + leverage set before every order."
 }

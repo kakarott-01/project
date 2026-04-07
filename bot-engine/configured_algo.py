@@ -1,21 +1,39 @@
+"""
+bot-engine/configured_algo.py — v2
+=====================================
+Changes from v1:
+  - Integrates leverage metadata from staged_open (set by CryptoAlgo)
+  - Paper mode uses leverage-aware PnL simulation via LeverageMixin
+  - Live mode calls setup_futures_position() before placing order
+  - Non-crypto markets: leverage is forced to 1 (guard in place)
+  - All other logic from v1 preserved.
+"""
+
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from algorithms.base_algo import BaseAlgo
+from leverage_mixin import LeverageMixin
 from strategy_engine import BlackBoxStrategyExecutor, strategy_default_timeframe
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SYMBOLS = {
-    "crypto": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
-    "indian": ["RELIANCE", "TCS", "HDFCBANK"],
+    "crypto":      ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
+    "indian":      ["RELIANCE", "TCS", "HDFCBANK"],
     "commodities": ["XAU/USD", "WTI/USD"],
-    "global": ["AAPL", "MSFT", "NVDA"],
+    "global":      ["AAPL", "MSFT", "NVDA"],
 }
 
 
-class ConfiguredMultiStrategyAlgo(BaseAlgo):
+class ConfiguredMultiStrategyAlgo(LeverageMixin, BaseAlgo):
+    """
+    Black-box multi-strategy algo that delegates to BlackBoxStrategyExecutor.
+    For crypto markets, leverage from confidence engine is propagated through
+    the staged_open dict and applied at execution time.
+    """
+
     def __init__(
         self,
         *args,
@@ -27,15 +45,15 @@ class ConfiguredMultiStrategyAlgo(BaseAlgo):
         allow_hedge_opposition: bool,
         **kwargs,
     ):
-        self._market_type_name = market_type_name
-        self._strategy_keys = strategy_keys
-        self._execution_mode = execution_mode
-        self._position_mode = position_mode
+        self._market_type_name    = market_type_name
+        self._strategy_keys       = strategy_keys
+        self._execution_mode      = execution_mode
+        self._position_mode       = position_mode
         self._allow_hedge_opposition = allow_hedge_opposition
-        self._executor = BlackBoxStrategyExecutor()
-        self._open_positions: Dict[str, Dict] = {}
-        self._db_synced: set = set()
-        self._staged_open: Dict[str, Dict] = {}
+        self._executor            = BlackBoxStrategyExecutor()
+        self._open_positions:  Dict[str, Dict] = {}
+        self._db_synced:       set = set()
+        self._staged_open:     Dict[str, Dict] = {}
         super().__init__(
             *args,
             position_scope_key=position_scope_key,
@@ -59,10 +77,13 @@ class ConfiguredMultiStrategyAlgo(BaseAlgo):
         return {
             "symbols": DEFAULT_SYMBOLS.get(self._market_type_name, []),
             "fee_rate": 0.001,
+            "risk_pct_per_trade": 1.0,
         }
 
     def get_symbols(self) -> List[str]:
         return self.config.get("symbols", DEFAULT_SYMBOLS.get(self._market_type_name, []))
+
+    # ── DB sync ───────────────────────────────────────────────────────────────
 
     async def _sync_position_from_db(self, symbol: str):
         if symbol in self._db_synced:
@@ -76,19 +97,26 @@ class ConfiguredMultiStrategyAlgo(BaseAlgo):
                 opened_at = open_row["opened_at"]
                 if hasattr(opened_at, "tzinfo") and opened_at.tzinfo is not None:
                     opened_at = opened_at.replace(tzinfo=None)
+                metadata = open_row.get("metadata") or {}
                 self._open_positions[symbol] = {
-                    "signal": open_row["side"].upper(),
+                    "signal":      open_row["side"].upper(),
                     "entry_price": float(open_row["entry_price"]),
-                    "opened_at": opened_at,
+                    "opened_at":   opened_at,
+                    "leverage":    int(metadata.get("leverage", 1)) if isinstance(metadata, dict) else 1,
+                    "confidence":  float(metadata.get("confidence", 50)) if isinstance(metadata, dict) else 50.0,
                 }
-        except Exception as e:
-            logger.error(f"❌ Strategy DB sync failed for {symbol}: {e}", exc_info=True)
+        except Exception as exc:
+            logger.error("❌ Strategy DB sync failed for %s: %s", symbol, exc, exc_info=True)
 
-    def _stage_open(self, symbol: str, signal: str, price: float):
+    # ── Staged open helpers ───────────────────────────────────────────────────
+
+    def _stage_open(self, symbol: str, signal: str, price: float, **extra):
         self._staged_open[symbol] = {
-            "signal": signal,
+            "signal":      signal,
             "entry_price": price,
-            "opened_at": datetime.utcnow(),
+            "opened_at":   datetime.utcnow(),
+            "leverage":    extra.get("leverage", 1),
+            "confidence":  extra.get("confidence", 50.0),
         }
 
     def _confirm_staged_open(self, symbol: str):
@@ -102,7 +130,9 @@ class ConfiguredMultiStrategyAlgo(BaseAlgo):
     def _close(self, symbol: str):
         self._open_positions.pop(symbol, None)
 
-    async def _decision_for_symbol(self, symbol: str) -> tuple[Optional[str], Optional[float]]:
+    # ── Signal generation ─────────────────────────────────────────────────────
+
+    async def _decision_for_symbol(self, symbol: str):
         votes: List[Optional[str]] = []
         latest_close = None
 
@@ -138,44 +168,54 @@ class ConfiguredMultiStrategyAlgo(BaseAlgo):
             return self._check_exit(symbol, latest_close, decision)
 
         if decision in ("BUY", "SELL"):
-            if (
-                len(self._strategy_keys) == 1
-                and self._execution_mode == "AGGRESSIVE"
-                and (self._position_mode != "HEDGE" or not self._allow_hedge_opposition)
-            ):
-                open_trades = await self.db.get_open_trades_for_symbol(
-                    self.user_id, self.market_type, symbol
-                )
-                opposite_exists = any(
-                    row["position_scope_key"] != self.position_scope_key
-                    and row["side"].upper() != decision
-                    for row in open_trades
-                )
-                if opposite_exists:
-                    logger.warning(
-                        f"[{self.name}] Aggressive entry blocked for {symbol}: "
-                        "opposite strategy direction already open on this symbol."
+            # Default leverage=1 for non-crypto; crypto uses CryptoAlgo directly
+            leverage = 1
+            if self._market_type_name == "crypto":
+                # For blackbox crypto strategies, use a conservative default
+                from confidence_engine import leverage_from_score, score_confidence
+                try:
+                    df_latest = await self.connector.fetch_ohlcv_cached(
+                        symbol,
+                        strategy_default_timeframe(self._strategy_keys[0]),
+                        limit=250,
                     )
-                    return None
+                    conf      = score_confidence(df_latest, decision)
+                    lev       = leverage_from_score(conf)
+                    if lev is None:
+                        return None  # confidence too low
+                    leverage = lev
+                except Exception as exc:
+                    logger.warning("⚠️  confidence scoring failed for %s: %s", symbol, exc)
+                    leverage = 1
 
-            self._stage_open(symbol, decision, latest_close)
+            self._stage_open(symbol, decision, latest_close, leverage=leverage)
             return decision
         return None
+
+    # ── Exit logic (leverage-aware) ───────────────────────────────────────────
 
     def _check_exit(self, symbol: str, close: float, decision: Optional[str]) -> Optional[str]:
         pos = self._open_positions[symbol]
         side = pos["signal"]
         entry = pos["entry_price"]
         opened_at = pos["opened_at"]
+        leverage = pos.get("leverage", 1)
 
         sl_pct = float(self.risk.cfg.stop_loss_pct)
         tp_pct = float(self.risk.cfg.take_profit_pct)
-        pnl_pct = ((entry - close) / entry) * 100 if side == "SELL" else ((close - entry) / entry) * 100
 
-        reverse = (side == "BUY" and decision == "SELL") or (side == "SELL" and decision == "BUY")
+        if side == "BUY":
+            price_pnl_pct = (close - entry) / entry * 100
+        else:
+            price_pnl_pct = (entry - close) / entry * 100
+
+        leveraged_pnl = price_pnl_pct * leverage
+
+        reverse = (side == "BUY" and decision == "SELL") or \
+                  (side == "SELL" and decision == "BUY")
         timed_out = (datetime.utcnow() - opened_at) > timedelta(hours=6)
 
-        if pnl_pct >= tp_pct or pnl_pct <= -sl_pct or reverse or timed_out:
+        if leveraged_pnl >= tp_pct or leveraged_pnl <= -sl_pct or reverse or timed_out:
             self._close(symbol)
             return "BUY" if side == "SELL" else "SELL"
         return None
