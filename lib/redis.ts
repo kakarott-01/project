@@ -39,9 +39,11 @@ export async function storeOtp(email: string, otp: string): Promise<void> {
 }
 
 export async function verifyOtp(email: string, otp: string): Promise<boolean> {
-  const stored = await redis.get<string>(`otp:${email}`)
-  if (!stored || stored !== otp) return false
-  await redis.del(`otp:${email}`)  // burn after use
+  const raw = await redis.get(`otp:${email}`)
+  if (raw == null) return false
+  const stored = String(raw).trim()
+  if (stored !== String(otp).trim()) return false
+  await redis.del(`otp:${email}`) // burn after use
   return true
 }
 

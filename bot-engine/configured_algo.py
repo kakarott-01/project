@@ -173,8 +173,9 @@ class ConfiguredMultiStrategyAlgo(LeverageMixin, BaseAlgo):
             return self._check_exit(symbol, latest_close, decision)
 
         if decision in ("BUY", "SELL"):
-            # Default leverage=1 for non-crypto; crypto uses CryptoAlgo directly
+            # Default leverage=1 for non-crypto; crypto uses confidence engine
             leverage = 1
+            conf = 50.0
             if self._market_type_name == "crypto":
                 # For blackbox crypto strategies, use a conservative default
                 from confidence_engine import leverage_from_score, score_confidence
@@ -184,15 +185,15 @@ class ConfiguredMultiStrategyAlgo(LeverageMixin, BaseAlgo):
                         strategy_default_timeframe(self._strategy_keys[0]),
                         limit=250,
                     )
-                    conf      = score_confidence(df_latest, decision)
-                    lev       = leverage_from_score(conf)
+                    conf = score_confidence(df_latest, decision)
+                    lev = leverage_from_score(conf)
                     if lev is None:
                         return None  # confidence too low
                     leverage = lev
                 except Exception as exc:
                     logger.warning("⚠️  confidence scoring failed for %s: %s", symbol, exc)
                     return None
-            self._stage_open(symbol, decision, latest_close, leverage=leverage, confidence=conf if self._market_type_name == "crypto" else 50.0)
+            self._stage_open(symbol, decision, latest_close, leverage=leverage, confidence=conf)
             return decision
         return None
 

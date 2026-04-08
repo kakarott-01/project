@@ -48,7 +48,8 @@ export async function POST(req: NextRequest) {
 
   const otp = generateSecureOtp()  // FIX: was Math.random()
   try {
-    await redis.set(`mode_switch_otp:${session.id}`, otp, { ex: 300 })
+    // Give users extra time to receive the email and complete the flow.
+    await redis.set(`mode_switch_otp:${session.id}`, otp, { ex: 600 })
   } catch (redisError) {
     console.error('Redis unavailable during mode OTP store:', redisError)
     return NextResponse.json(

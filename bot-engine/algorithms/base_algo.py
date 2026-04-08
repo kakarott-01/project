@@ -614,6 +614,7 @@ class BaseAlgo(ABC):
             "leverage": int(_safe_float(exchange_position.get("leverage"), 1.0) or 1.0),
             "liquidation_price": exchange_position.get("liquidation_price"),
         }
+        stop_order_id = matching_stop.get("id") if matching_stop else None
         trade_id = await self.db.save_live_trade(
             user_id=self.user_id,
             symbol=symbol,
@@ -632,6 +633,7 @@ class BaseAlgo(ABC):
             strategy_key=self.strategy_key,
             position_scope_key=self.position_scope_key,
             metadata=metadata,
+            stop_loss_order_id=stop_order_id,
         )
         if trade_id:
             if hasattr(self, "_open_positions"):
@@ -760,26 +762,21 @@ class BaseAlgo(ABC):
                 if self._session_ref
                 else db_open
             )
-            try:
-                exchange_symbols = set()
-                if self.market_type in FUTURES_MARKETS:
-                    exchange_positions = await self.connector.fetch_positions()
-                    exchange_symbols |= {
-                        p.get("symbol", "")
-                        for p in exchange_positions
-                        if p.get("symbol")
-                    }
-                exchange_orders = await self.connector.fetch_open_orders()
+            exchange_symbols = set()
+            if self.market_type in FUTURES_MARKETS:
+                exchange_positions = await self.connector.fetch_positions_checked()
                 exchange_symbols |= {
-                    o.get("symbol", "")
-                    for o in exchange_orders
-                    if o.get("symbol")
+                    p.get("symbol", "")
+                    for p in exchange_positions
+                    if p.get("symbol")
                 }
-                exchange_symbol_count = len(exchange_symbols)
-            except Exception as e:
-                logger.warning(f"[{self.name}] ⚠️  Exchange order fetch failed during reconcile: {e}. Skipping.")
-                self._reconciled = True
-                return
+            exchange_orders = await self.connector.fetch_open_orders_checked()
+            exchange_symbols |= {
+                o.get("symbol", "")
+                for o in exchange_orders
+                if o.get("symbol")
+            }
+            exchange_symbol_count = len(exchange_symbols)
             owned_symbols = {str(trade["symbol"]) for trade in owned}
             untracked_exchange_symbols = {symbol for symbol in exchange_symbols if symbol and symbol not in owned_symbols}
             if untracked_exchange_symbols:
@@ -946,9 +943,9 @@ class BaseAlgo(ABC):
             return
 
         for symbol in self.get_symbols():
-            await self._process_symbol(symbol, balance, is_draining=is_draining)
+            await self._process_symbol(symbol, balance, is_draining=is_draining, global_snapshot=global_snapshot)
 
-    async def _process_symbol(self, symbol: str, balance: float, is_draining: bool = False):
+    async def _process_symbol(self, symbol: str, balance: float, is_draining: bool = False, global_snapshot: Optional[Dict] = None):
         slot_reserved = False
         try:
             async with self._symbol_execution_guard(symbol):
@@ -1038,6 +1035,7 @@ class BaseAlgo(ABC):
                     quantity=quantity,
                     runtime_settings=runtime_settings,
                     trade_plan=trade_plan,
+                    global_snapshot=global_snapshot,
                 )
                 if not can_enter:
                     if hasattr(self, "_discard_staged_open"):
@@ -1508,6 +1506,7 @@ class BaseAlgo(ABC):
                 stop_loss=actual_trade_plan["stop_loss"],
                 take_profit=actual_trade_plan["take_profit"],
                 order_id=order_id,
+                stop_loss_order_id=order.get("stopLossOrderId") or None,
             )
 
             if trade_id:
@@ -1615,6 +1614,8 @@ class BaseAlgo(ABC):
         quantity: float,
         runtime_settings: Dict,
         trade_plan: Dict[str, float],
+        ,
+        global_snapshot: Optional[Dict] = None,
     ) -> Tuple[float, bool, str, Dict]:
         health = runtime_settings.get("health", {})
         if health.get("is_auto_disabled"):
@@ -1628,7 +1629,8 @@ class BaseAlgo(ABC):
             if elapsed < cooldown_after_trade_sec:
                 return quantity, False, f"Cooldown active for {cooldown_after_trade_sec - elapsed:.0f}s", {"cooldownRemaining": cooldown_after_trade_sec - elapsed}
 
-        global_snapshot = await self.db.get_global_risk_snapshot(self.user_id)
+        if global_snapshot is None:
+            global_snapshot = await self.db.get_global_risk_snapshot(self.user_id)
 
         if self.execution_mode == "AGGRESSIVE" and self.strategy_key:
             capital_allocation = runtime_settings.get("capital_allocation", {})
@@ -1689,6 +1691,7 @@ class BaseAlgo(ABC):
         take_profit: float,
         order_id: str,
         metadata: Optional[dict] = None,
+        stop_loss_order_id: Optional[str] = None,
     ) -> Optional[str]:
         import asyncio
 
@@ -1708,6 +1711,7 @@ class BaseAlgo(ABC):
                     strategy_key=self.strategy_key,
                     position_scope_key=self.position_scope_key,
                     metadata=getattr(self, "_staged_open", {}).get(symbol),
+                    stop_loss_order_id=stop_loss_order_id,
                 )
             except Exception as e:
                 last_error = e
@@ -1737,6 +1741,7 @@ class BaseAlgo(ABC):
             "session_ref": self._session_ref,
             "exchange_name": self.connector.exchange_name,
             "fee_rate": fee_rate,
+            "stop_loss_order_id": stop_loss_order_id,
             "retry_count": 0,
             "last_error": str(last_error)[:300] if last_error else "unknown",
             "spooled_at": datetime.utcnow().isoformat(),

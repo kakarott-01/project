@@ -2,6 +2,7 @@
 
 import { useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useBotStatusQuery } from '@/lib/use-bot-status-query'
 import {
   AlertTriangle, Loader2, Power, ShieldAlert, Square,
   X, Zap, Play, Swords, Shield,
@@ -348,6 +349,9 @@ export function BotControls({ botData }: { botData: any }) {
   const pushToast = useToastStore((s) => s.push)
   const isFiringRef = useRef(false)
 
+  // Prefer the live query data from React Query to avoid stale props
+  const { data: liveBotData } = useBotStatusQuery()
+
   // Modal state
   const [showStopAllModal, setShowStopAllModal]   = useState(false)
   const [startModal, setStartModal]               = useState<{ market: MarketId } | null>(null)
@@ -367,15 +371,16 @@ export function BotControls({ botData }: { botData: any }) {
     staleTime: 30_000,
   })
 
-  const status:         string    = botData?.status        ?? 'stopped'
-  const openTradeCount: number    = botData?.openTradeCount ?? 0
-  const sessions:       SessionItem[] = botData?.sessions  ?? []
-  const activeMarkets:  MarketId[] = botData?.activeMarkets ?? []
-  const botErrorMessage: string | null = botData?.errorMessage ?? null
+  const dataSource = liveBotData ?? botData
+  const status:         string    = dataSource?.status        ?? 'stopped'
+  const openTradeCount: number    = dataSource?.openTradeCount ?? 0
+  const sessions:       SessionItem[] = dataSource?.sessions  ?? []
+  const activeMarkets:  MarketId[] = dataSource?.activeMarkets ?? []
+  const botErrorMessage: string | null = dataSource?.errorMessage ?? null
   const isStopping = status === 'stopping'
 
   // ── FIX: Use perMarketOpenTrades from API for accurate per-market counts ──
-  const perMarketOpenTrades: Record<string, number> = botData?.perMarketOpenTrades ?? {}
+  const perMarketOpenTrades: Record<string, number> = dataSource?.perMarketOpenTrades ?? {}
 
   const hasLiveMarkets = (modeData?.markets ?? []).some(
     (m: any) => m.mode === 'live' && activeMarkets.includes(m.marketType),

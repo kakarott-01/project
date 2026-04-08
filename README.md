@@ -34,7 +34,7 @@ lib/               Auth, DB, encryption, bot orchestration, strategy services
 bot-engine/        Python execution engine, scheduler, exchange connector, algorithms
 drizzle/           SQL migrations
 ```
-
+ 
 ## Local Setup
 
 Setup steps, env vars, and run commands are in [setup.md](./setup.md).

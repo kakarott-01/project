@@ -73,6 +73,7 @@ class BotContext:
     markets:          List[str]
     session_ids:      Dict[str, str]         = field(default_factory=dict)
     connectors:       Dict[str, object]      = field(default_factory=dict)
+    risk_managers:    Dict[str, object]      = field(default_factory=dict)
     job_ids:          List[str]              = field(default_factory=list)
     market_job_ids:   Dict[str, List[str]]   = field(default_factory=dict)
     started_at:       datetime               = field(default_factory=datetime.utcnow)
@@ -370,6 +371,14 @@ class BotScheduler:
                 ctx.job_ids.remove(job_id)
 
         ctx.market_job_ids.pop(market, None)
+        # Persist risk manager state for this market before removal
+        try:
+            rm = ctx.risk_managers.pop(market, None)
+            if rm is not None:
+                await rm.persist_state(self._db, user_id, market)
+        except Exception as e:
+            logger.warning(f"⚠️  Could not persist risk state for user={user_id} market={market}: {e}")
+
         ctx.connectors.pop(market, None)
         ctx.session_ids.pop(market, None)
         ctx.markets = [item for item in ctx.markets if item != market]
@@ -430,6 +439,10 @@ class BotScheduler:
                 f"⚠️  Could not load risk state for market={market}: {e}. "
                 "Starting with zero values."
             )
+
+        # Keep a reference to the per-market risk manager so we can persist
+        # its state when the market is later stopped.
+        ctx.risk_managers[market] = risk_mgr
 
         interval = MARKET_INTERVAL.get(market, 60)
         if market == "crypto":

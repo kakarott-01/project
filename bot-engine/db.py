@@ -859,7 +859,8 @@ class Database:
                     exchange_name=payload.get("exchange_name", "live"),
                     fee_rate=float(payload.get("fee_rate", 0.001)),
                     strategy_key=payload.get("strategy_key"),
-                    position_scope_key=payload.get("position_scope_key"),
+                        position_scope_key=payload.get("position_scope_key"),
+                        stop_loss_order_id=payload.get("stop_loss_order_id"),
                 )
                 if trade_id:
                     restored += 1
@@ -970,6 +971,7 @@ class Database:
         strategy_key: Optional[str] = None,
         position_scope_key: Optional[str] = None,
         metadata: Optional[dict] = None,
+        stop_loss_order_id: Optional[str] = None,
     ) -> Optional[str]:
         # F9: Use actual filled quantity if provided, fall back to requested quantity
         recorded_quantity = actual_quantity if actual_quantity is not None else quantity
@@ -987,8 +989,8 @@ class Database:
                (user_id, exchange_name, market_type, symbol, side, quantity,
                 entry_price, stop_loss, take_profit, fee_rate,
                 filled_quantity, remaining_quantity, status, algo_used, strategy_key, position_scope_key,
-                is_paper, exchange_order_id, bot_session_ref, metadata, opened_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0,$6,'open',$11,$12,$13,false,$14,$15,$16,$17)
+                is_paper, exchange_order_id, stop_loss_order_id, bot_session_ref, metadata, opened_at)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0,$6,'open',$11,$12,$13,false,$14,$15,$16,$17,$18)
                ON CONFLICT (user_id, market_type, symbol, position_scope_key)
                WHERE status='open' DO NOTHING
                RETURNING id""",
@@ -996,6 +998,7 @@ class Database:
             side.lower(), str(recorded_quantity), str(price),
             str(stop_loss), str(take_profit), str(fee_rate),
             algo_name, strategy_key, scope_key, order_id,
+            stop_loss_order_id,
             session_ref or None,
             metadata,
             datetime.utcnow(),

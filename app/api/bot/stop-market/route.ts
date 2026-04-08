@@ -20,6 +20,7 @@ import { botStatuses, botSessions, trades } from '@/lib/schema'
 import { eq, and, sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { getBotStatusSnapshot } from '@/lib/bot/status-snapshot'
+import { acquireBotLock } from '@/lib/bot-lock'
 
 const schema = z.object({
   marketType: z.enum(['indian', 'crypto', 'commodities', 'global']),
@@ -35,8 +36,37 @@ export async function POST(req: NextRequest) {
 
   const { marketType, mode } = parsed.data
 
+  // Acquire bot-level lock to avoid concurrent start/stop/market changes
+  const lock = await acquireBotLock(session.id, 'stop')
+  if (!lock.acquired) {
+    if (lock.isRedisDown) {
+      // Redis is down — allow stop-market to proceed without lock.
+      // _doImmediateStop and other DB operations are DB-guarded.
+      console.warn(`[bot/stop-market] Redis down for user=${session.id} — proceeding without lock`)
+      try {
+        return await _handleStopMarket(req, session.id, marketType, mode)
+      } catch (e) {
+        console.error('[bot/stop-market] Stop-market failed while Redis down:', e)
+        return NextResponse.json({ error: 'Failed to stop market. Please try again.' }, { status: 500 })
+      }
+    }
+    // Lock contention — another start/stop in progress
+    return NextResponse.json({ error: lock.reason }, { status: 429 })
+  }
+
+  try {
+    return await _handleStopMarket(req, session.id, marketType, mode)
+  } finally {
+    await lock.release()
+  }
+
+
+async function _handleStopMarket(req: NextRequest, userId: string, marketType: string, mode: 'graceful' | 'close_all') {
+  // The original POST handler code follows — moved into this helper so we
+  // can control lock acquisition/release behavior above.
+
   const current = await db.query.botStatuses.findFirst({
-    where: eq(botStatuses.userId, session.id),
+    where: eq(botStatuses.userId, userId),
     columns: { status: true, activeMarkets: true },
   })
 
@@ -57,15 +87,11 @@ export async function POST(req: NextRequest) {
     .select({ count: sql<number>`count(*)::int` })
     .from(trades)
     .where(and(
-      eq(trades.userId, session.id),
+      eq(trades.userId, userId),
       eq(trades.marketType, marketType as any),
       eq(trades.status, 'open' as any),
     ))
   const openCount = openRows?.count ?? 0
-
-  // ── Sync engine: remove this market from the scheduler ──────────────────
-  // Whether drain or close_all, we always remove the market from the active list.
-  // For close_all we then also trigger position closing.
 
   if (remainingMarkets.length === 0) {
     // Last market — do a full bot stop instead
@@ -79,7 +105,7 @@ export async function POST(req: NextRequest) {
         stoppedAt: mode === 'close_all' ? null : now,
         updatedAt: now,
       })
-      .where(eq(botStatuses.userId, session.id))
+      .where(eq(botStatuses.userId, userId))
   } else {
     // Keep other markets running
     await db
@@ -88,13 +114,13 @@ export async function POST(req: NextRequest) {
         activeMarkets: remainingMarkets,
         updatedAt: now,
       })
-      .where(eq(botStatuses.userId, session.id))
+      .where(eq(botStatuses.userId, userId))
   }
 
   // Mark the session for this market as stopped
   const runningSessions = await db.query.botSessions.findMany({
     where: and(
-      eq(botSessions.userId, session.id),
+      eq(botSessions.userId, userId),
       eq(botSessions.market, marketType),
       eq(botSessions.status, 'running'),
     ),
@@ -111,7 +137,7 @@ export async function POST(req: NextRequest) {
         })
         .from(trades)
         .where(and(
-          eq(trades.userId, session.id),
+          eq(trades.userId, userId),
           eq(trades.marketType, marketType as any),
           s.startedAt ? sql`${trades.openedAt} >= ${s.startedAt}` : sql`true`,
         ))
@@ -135,31 +161,27 @@ export async function POST(req: NextRequest) {
   // ── Notify bot engine ───────────────────────────────────────────────────
   try {
     if (mode === 'close_all' && openCount > 0) {
-      // Trigger close-all for this market's positions
-      // The engine's close-all accepts a market_type filter via the new endpoint
       await fetch(`${process.env.BOT_ENGINE_URL}/bot/close-market`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-Bot-Secret': process.env.BOT_ENGINE_SECRET!,
         },
-        body: JSON.stringify({ user_id: session.id, market_type: marketType }),
+        body: JSON.stringify({ user_id: userId, market_type: marketType }),
         signal: AbortSignal.timeout(8_000),
       }).catch(() => {
-        // Fallback: use generic close-all if market-specific endpoint not available
         return fetch(`${process.env.BOT_ENGINE_URL}/bot/close-all`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'X-Bot-Secret': process.env.BOT_ENGINE_SECRET!,
           },
-          body: JSON.stringify({ user_id: session.id }),
+          body: JSON.stringify({ user_id: userId }),
           signal: AbortSignal.timeout(8_000),
         })
       })
     }
 
-    // Always sync the scheduler to remove this market's jobs
     if (remainingMarkets.length > 0) {
       await fetch(`${process.env.BOT_ENGINE_URL}/bot/sync`, {
         method: 'POST',
@@ -167,7 +189,7 @@ export async function POST(req: NextRequest) {
           'Content-Type': 'application/json',
           'X-Bot-Secret': process.env.BOT_ENGINE_SECRET!,
         },
-        body: JSON.stringify({ user_id: session.id, markets: remainingMarkets }),
+        body: JSON.stringify({ user_id: userId, markets: remainingMarkets }),
         signal: AbortSignal.timeout(8_000),
       })
     } else {
@@ -177,7 +199,7 @@ export async function POST(req: NextRequest) {
           'Content-Type': 'application/json',
           'X-Bot-Secret': process.env.BOT_ENGINE_SECRET!,
         },
-        body: JSON.stringify({ user_id: session.id }),
+        body: JSON.stringify({ user_id: userId }),
         signal: AbortSignal.timeout(8_000),
       })
     }
@@ -185,7 +207,7 @@ export async function POST(req: NextRequest) {
     console.warn(`[stop-market] Engine notify failed (non-fatal):`, err)
   }
 
-  const { snapshot } = await getBotStatusSnapshot(session.id)
+  const { snapshot } = await getBotStatusSnapshot(userId)
   return NextResponse.json({
     success: true,
     stoppedMarket: marketType,
@@ -194,4 +216,5 @@ export async function POST(req: NextRequest) {
     openPositionsClosed: mode === 'close_all' ? openCount : 0,
     ...snapshot,
   })
+}
 }

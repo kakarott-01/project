@@ -35,9 +35,8 @@ export function getClientIp(request: Request): string {
   return '127.0.0.1'
 }
 
-export function generateOtp(): string {
-  return Math.floor(100000 + Math.random() * 900000).toString()
-}
+// Note: insecure Math.random() OTP generator intentionally removed.
+// Use the secure generator in `lib/otp.ts` (e.g., `generateSecureOtp()`).
 
 export function maskApiKey(key: string): string {
   if (key.length <= 8) return '••••••••'
