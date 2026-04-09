@@ -244,7 +244,7 @@ export const strategyPerformance = pgTable('strategy_performance', {
   lastHealthStatus:   varchar('last_health_status', { length: 30 }).default('healthy').notNull(),
   updatedAt:          timestamp('updated_at').defaultNow().notNull(),
 }, (t) => ({
-  userStrategyIdx: index('strategy_performance_user_market_strategy_idx').on(t.userId, t.marketType, t.strategyKey),
+  userStrategyIdx: index('strategy_performance_user_market_strategy_uq').on(t.userId, t.marketType, t.strategyKey),
 }))
 
 export const backtestResults = pgTable('backtest_results', {
@@ -380,6 +380,7 @@ export const trades = pgTable('trades', {
   signalId:        uuid('signal_id'),
   isPaper:         boolean('is_paper').default(true).notNull(),
   exchangeOrderId: varchar('exchange_order_id', { length: 255 }),
+  stopLossOrderId: varchar('stop_loss_order_id', { length: 255 }),
   openedAt:        timestamp('opened_at').defaultNow().notNull(),
   closedAt:        timestamp('closed_at'),
   metadata:        jsonb('metadata'),
@@ -392,6 +393,7 @@ export const trades = pgTable('trades', {
   statusIdx:    index('trades_status_idx').on(t.status),
   openedIdx:    index('trades_opened_idx').on(t.openedAt),
   sessionIdx:   index('trades_session_idx').on(t.sessionId),
+  stopLossIdx:  index('idx_trades_stop_loss_order_id').on(t.stopLossOrderId),
   userOpenIdx:  index('idx_trades_user_open').on(t.userId, t.status),
   strategyIdx:  index('trades_strategy_idx').on(t.strategyKey),
   scopeIdx:     index('trades_scope_idx').on(t.userId, t.marketType, t.symbol, t.positionScopeKey),
