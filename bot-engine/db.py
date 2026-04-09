@@ -23,7 +23,7 @@ import hashlib
 from pathlib import Path
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, Dict, List, Any
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 import asyncpg
 from Crypto.Cipher import AES
@@ -68,6 +68,31 @@ def decrypt_field(ciphertext: str) -> Optional[str]:
     if ciphertext.startswith("v2:"):
         return _decrypt_v2(ciphertext[3:])
     return _decrypt_legacy(ciphertext)
+
+
+# ── Legacy decrypt alerting / automatic re-encryption helpers ───────────────
+LEGACY_DECRYPT_COUNT = 0
+
+def _is_legacy_ciphertext(ct: Optional[str]) -> bool:
+    """Return True if the ciphertext appears to be the legacy CryptoJS OpenSSL salted format."""
+    if not ct or not isinstance(ct, str):
+        return False
+    if ct.startswith("v2:"):
+        return False
+    try:
+        raw = base64.b64decode(ct)
+        return raw[:8] == b"Salted__"
+    except Exception:
+        return False
+
+def _encrypt_v2(plaintext: str) -> str:
+    """Encrypt plaintext to v2 format (returns string prefixed with 'v2:')."""
+    key = _derive_key_v2()
+    nonce = os.urandom(12)
+    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+    ciphertext, tag = cipher.encrypt_and_digest(plaintext.encode("utf-8"))
+    packed = nonce + tag + ciphertext
+    return "v2:" + base64.b64encode(packed).decode("ascii")
 
 
 def _decrypt_v2(b64: str) -> Optional[str]:
@@ -186,23 +211,79 @@ class Database:
     async def get_exchange_apis(self, user_id: str) -> Dict[str, Dict]:
         pool = await self.pool()
         rows = await pool.fetch(
-            """SELECT market_type, exchange_name, api_key_enc, api_secret_enc, extra_fields_enc
+            """SELECT id, market_type, exchange_name, api_key_enc, api_secret_enc, extra_fields_enc
                FROM exchange_apis WHERE user_id=$1 AND is_active=true""",
             user_id,
         )
         result: Dict[str, Dict] = {}
         for row in rows:
             try:
-                api_key    = decrypt_field(row["api_key_enc"])
-                api_secret = decrypt_field(row["api_secret_enc"])
+                api_key_ct = row["api_key_enc"]
+                api_secret_ct = row["api_secret_enc"]
+                api_key = decrypt_field(api_key_ct)
+                api_secret = decrypt_field(api_secret_ct)
                 if not api_key or not api_secret:
                     logger.warning(f"⚠️  Skipping market={row['market_type']}: decryption returned empty")
                     continue
+
+                # extra fields (optional JSON blob)
                 extra: Dict = {}
-                if row["extra_fields_enc"]:
-                    raw = decrypt_field(row["extra_fields_enc"])
-                    if raw:
-                        extra = json.loads(raw)
+                raw_extra_ct = row.get("extra_fields_enc")
+                raw_extra = None
+                if raw_extra_ct:
+                    raw_extra = decrypt_field(raw_extra_ct)
+                    if raw_extra:
+                        try:
+                            extra = json.loads(raw_extra)
+                        except Exception:
+                            extra = {}
+
+                # Detect legacy CryptoJS ciphertexts and re-encrypt to v2 on-first-read
+                try:
+                    needs_reencrypt = False
+                    if _is_legacy_ciphertext(api_key_ct) or _is_legacy_ciphertext(api_secret_ct) or (raw_extra_ct and _is_legacy_ciphertext(raw_extra_ct)):
+                        needs_reencrypt = True
+                    if needs_reencrypt:
+                        # Respect an optional cutoff date after which legacy ciphertexts are rejected
+                        cutoff = os.getenv("LEGACY_DECRYPT_CUTOFF_DATE")
+                        if cutoff:
+                            try:
+                                cutoff_dt = datetime.fromisoformat(cutoff)
+                            except Exception:
+                                try:
+                                    cutoff_dt = datetime.strptime(cutoff, "%Y-%m-%d")
+                                except Exception:
+                                    cutoff_dt = None
+                        else:
+                            cutoff_dt = None
+
+                        if cutoff_dt and datetime.utcnow() > cutoff_dt:
+                            logger.critical(
+                                f"💀 Rejecting legacy exchange API for user={user_id} market={row['market_type']} due to cutoff={cutoff_dt.isoformat()}"
+                            )
+                            continue
+
+                        # Attempt re-encryption to v2
+                        try:
+                            new_api_key = _encrypt_v2(api_key) if api_key is not None else None
+                            new_api_secret = _encrypt_v2(api_secret) if api_secret is not None else None
+                            new_extra = _encrypt_v2(raw_extra) if raw_extra is not None else None
+                            await pool.execute(
+                                """UPDATE exchange_apis
+                                   SET api_key_enc=$1, api_secret_enc=$2, extra_fields_enc=$3, updated_at=NOW()
+                                   WHERE id=$4""",
+                                new_api_key, new_api_secret, new_extra, row["id"],
+                            )
+                            global LEGACY_DECRYPT_COUNT
+                            LEGACY_DECRYPT_COUNT += 1
+                            logger.info(f"🔁 Re-encrypted legacy exchange API for user={user_id} market={row['market_type']}")
+                        except Exception as e:
+                            logger.error(f"❌ Failed to re-encrypt legacy API for user={user_id} market={row['market_type']}: {e}")
+
+                except Exception:
+                    # Non-fatal detection error; continue loading the API entry
+                    pass
+
                 result[row["market_type"]] = {
                     "exchange_name": row["exchange_name"],
                     "api_key":       api_key,
@@ -211,6 +292,8 @@ class Database:
                 }
             except Exception as e:
                 logger.error(f"❌ API load failed market={row['market_type']}: {e}")
+        if LEGACY_DECRYPT_COUNT > 0:
+            logger.warning(f"⚠️  Legacy decrypts detected and re-encrypted: {LEGACY_DECRYPT_COUNT}")
         return result
 
     async def get_market_modes(self, user_id: str) -> Dict[str, bool]:
@@ -733,6 +816,70 @@ class Database:
                     )
                 return actual_count
 
+    # ── Global exposure reservation (ephemeral) ───────────────────────────
+
+    async def reserve_global_exposure(
+        self,
+        user_id: str,
+        amount: float,
+        ttl_seconds: int = 30,
+        max_total_exposure: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Attempt to reserve 'amount' of notional exposure for the user.
+        This acquires an advisory xact lock keyed by user and a fixed token
+        to avoid races across markets. If reservation succeeds, a row is
+        inserted into global_exposure_reservations with an expires_at.
+        Returns a dict with reserved:boolean and reservation_id (uuid) on success.
+        """
+        pool = await self.pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                lock_acquired = await conn.fetchval(
+                    "SELECT pg_try_advisory_xact_lock(hashtext($1), hashtext($2))",
+                    user_id, "global_exposure",
+                )
+                # If we couldn't acquire the lock, report lock timeout
+                if not lock_acquired:
+                    open_row = await conn.fetchrow(
+                        """SELECT COALESCE(SUM(COALESCE(remaining_quantity, quantity) * entry_price), 0) AS total_exposure
+                           FROM trades WHERE user_id=$1 AND status='open'""",
+                        user_id,
+                    )
+                    total_exposure = float(open_row["total_exposure"] or 0) if open_row else 0.0
+                    return {"reserved": False, "lock_timeout": True, "total_exposure": total_exposure, "reason": "Timed out waiting for exposure lock"}
+
+                open_row = await conn.fetchrow(
+                    """SELECT COALESCE(SUM(COALESCE(remaining_quantity, quantity) * entry_price), 0) AS total_exposure
+                       FROM trades WHERE user_id=$1 AND status='open'""",
+                    user_id,
+                )
+                open_exposure = float(open_row["total_exposure"] or 0) if open_row else 0.0
+                reserved_row = await conn.fetchrow(
+                    "SELECT COALESCE(SUM(amount),0) as reserved FROM global_exposure_reservations WHERE user_id=$1 AND (expires_at IS NULL OR expires_at > NOW())",
+                    user_id,
+                )
+                reserved_exposure = float(reserved_row["reserved"] or 0) if reserved_row else 0.0
+                current_total = open_exposure + reserved_exposure
+                if max_total_exposure and (current_total + float(amount)) > float(max_total_exposure):
+                    return {"reserved": False, "lock_timeout": False, "total_exposure": current_total, "reason": "Global exposure would exceed configured limit"}
+
+                expires_at = None
+                if ttl_seconds and ttl_seconds > 0:
+                    expires_at = datetime.utcnow() + timedelta(seconds=ttl_seconds)
+
+                row = await conn.fetchrow(
+                    "INSERT INTO global_exposure_reservations (user_id, amount, created_at, expires_at) VALUES ($1,$2,NOW(),$3) RETURNING id",
+                    user_id, str(amount), expires_at,
+                )
+                return {"reserved": True, "reservation_id": str(row["id"]), "total_exposure": current_total + float(amount)}
+
+    async def release_global_exposure_reservation(self, reservation_id: str):
+        pool = await self.pool()
+        try:
+            await pool.execute("DELETE FROM global_exposure_reservations WHERE id=$1", reservation_id)
+        except Exception:
+            logger.exception("Failed to release global exposure reservation %s", reservation_id)
+
     # ── Watchdog restart counter ──────────────────────────────────────────────
 
     async def get_watchdog_restart_count(self, user_id: str) -> int:
@@ -859,8 +1006,9 @@ class Database:
                     exchange_name=payload.get("exchange_name", "live"),
                     fee_rate=float(payload.get("fee_rate", 0.001)),
                     strategy_key=payload.get("strategy_key"),
-                        position_scope_key=payload.get("position_scope_key"),
-                        stop_loss_order_id=payload.get("stop_loss_order_id"),
+                    position_scope_key=payload.get("position_scope_key"),
+                    stop_loss_order_id=payload.get("stop_loss_order_id"),
+                    exposure_reservation_id=payload.get("exposure_reservation_id"),
                 )
                 if trade_id:
                     restored += 1
@@ -924,6 +1072,7 @@ class Database:
         strategy_key: Optional[str] = None,
         position_scope_key: Optional[str] = None,
         metadata: Optional[dict] = None,
+        exposure_reservation_id: Optional[str] = None,
     ) -> Optional[str]:
         pool = await self.pool()
         scope_key = position_scope_key or strategy_key or algo_name or "default"
@@ -946,6 +1095,12 @@ class Database:
         )
         if row:
             logger.info(f"📝 Paper trade opened: {side.upper()} {quantity:.6f} {symbol} @ {price}")
+            # If a global exposure reservation exists for this trade, release it
+            if exposure_reservation_id:
+                try:
+                    await pool.execute("DELETE FROM global_exposure_reservations WHERE id=$1", exposure_reservation_id)
+                except Exception:
+                    logger.exception("Failed to release exposure reservation after paper trade saved")
             return str(row["id"])
         else:
             logger.warning(f"⚠️  Duplicate open trade blocked for {symbol} (user={user_id[:8]}…)")
@@ -972,6 +1127,7 @@ class Database:
         position_scope_key: Optional[str] = None,
         metadata: Optional[dict] = None,
         stop_loss_order_id: Optional[str] = None,
+        exposure_reservation_id: Optional[str] = None,
     ) -> Optional[str]:
         # F9: Use actual filled quantity if provided, fall back to requested quantity
         recorded_quantity = actual_quantity if actual_quantity is not None else quantity
@@ -1005,6 +1161,12 @@ class Database:
         )
         if row:
             logger.info(f"📝 Live trade opened: {side.upper()} {recorded_quantity} {symbol} @ {price}")
+            # Release any exposure reservation associated with this trade
+            if exposure_reservation_id:
+                try:
+                    await pool.execute("DELETE FROM global_exposure_reservations WHERE id=$1", exposure_reservation_id)
+                except Exception:
+                    logger.exception("Failed to release exposure reservation after live trade saved")
             return str(row["id"])
         else:
             logger.warning(f"⚠️  Duplicate live trade blocked for {symbol} (user={user_id[:8]}…)")

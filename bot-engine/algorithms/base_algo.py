@@ -743,6 +743,41 @@ class BaseAlgo(ABC):
                     return False
         return True
 
+    async def _symbol_present_on_exchange(self, symbol: str) -> bool:
+        """Robustly check whether a symbol has any presence on the exchange.
+
+        This tries multiple fallbacks because some exchanges return positions
+        or open orders differently depending on market type or API quirks.
+        Returns True if a non-zero position or any open order exists for the
+        symbol; False otherwise.
+        """
+        try:
+            # Preferred: per-symbol positions (handles futures positions)
+            pos = await self.connector.fetch_position_for_symbol(symbol)
+            if pos:
+                qty = _safe_float(pos.get("quantity") or pos.get("contracts") or pos.get("size") or pos.get("amount"))
+                if qty > 0:
+                    return True
+        except Exception as e:
+            logger.debug(f"⚠️  fetch_position_for_symbol failed for {symbol}: {e}")
+
+        try:
+            # Next: any open orders for the symbol
+            orders = await self.connector.fetch_open_orders_checked(symbol)
+            if orders:
+                return True
+        except Exception as e:
+            logger.debug(f"⚠️  fetch_open_orders_checked failed for {symbol}: {e}")
+            try:
+                orders = await self.connector.fetch_open_orders(symbol)
+                if orders:
+                    return True
+            except Exception:
+                pass
+
+        # Nothing found
+        return False
+
     async def _reconcile_positions(self):
         if self._paper_mode:
             self._reconciled = True
@@ -788,6 +823,19 @@ class BaseAlgo(ABC):
             for trade in owned:
                 symbol = trade["symbol"]
                 if symbol not in exchange_symbols:
+                    # Before treating as orphan, perform a per-symbol verification
+                    try:
+                        present = await self._symbol_present_on_exchange(symbol)
+                    except Exception as e:
+                        logger.warning(f"[{self.name}] ⚠️  Per-symbol check failed for {symbol}: {e}")
+                        present = False
+
+                    if present:
+                        logger.info(f"[{self.name}] ℹ️  Symbol {symbol} present on exchange (detected by per-symbol check); skipping orphan cancel")
+                        # Mark it as seen so we don't repeatedly check
+                        exchange_symbols.add(symbol)
+                        continue
+
                     logger.warning(f"[{self.name}] 🔍 Orphan at startup: {symbol} id={trade['id']}")
                     await self.db.cancel_orphan_trade(trade["id"])
                     if hasattr(self, "_open_positions"):
@@ -844,6 +892,17 @@ class BaseAlgo(ABC):
                 symbol = trade_ref["symbol"]
                 trade_id = trade_ref["id"]
                 if symbol not in exchange_symbols:
+                    # Try per-symbol verification before cancelling
+                    try:
+                        present = await self._symbol_present_on_exchange(symbol)
+                    except Exception as e:
+                        logger.warning(f"[{self.name}] ⚠️  Per-symbol runtime check failed for {symbol}: {e}")
+                        present = False
+
+                    if present:
+                        logger.info(f"[{self.name}] ℹ️  Runtime: symbol {symbol} present on exchange; skipping cancel")
+                        continue
+
                     logger.warning(f"[{self.name}] 🔍 Runtime orphan: {symbol} id={trade_id}")
                     was_fixed = await self.db.cancel_orphan_trade(trade_id)
                     if was_fixed:
@@ -947,6 +1006,7 @@ class BaseAlgo(ABC):
 
     async def _process_symbol(self, symbol: str, balance: float, is_draining: bool = False, global_snapshot: Optional[Dict] = None):
         slot_reserved = False
+        exposure_reservation_id: Optional[str] = None
         try:
             async with self._symbol_execution_guard(symbol):
                 if symbol in self._blocked_symbols:
@@ -1105,6 +1165,44 @@ class BaseAlgo(ABC):
                 slot_reserved = True
                 self.risk.open_trade_count = int(reservation.get("open_trade_count") or self.risk.open_trade_count)
 
+                # Reserve global exposure (ephemeral) to avoid races across markets
+                if not self._paper_mode:
+                    try:
+                        max_total = float(getattr(self.risk.cfg, "max_total_exposure", 0.0) or 0.0)
+                    except Exception:
+                        max_total = 0.0
+                    try:
+                        global_res = await self.db.reserve_global_exposure(
+                            self.user_id,
+                            float(proposed_notional),
+                            ttl_seconds=30,
+                            max_total_exposure=max_total,
+                        )
+                        if not global_res.get("reserved"):
+                            if hasattr(self, "_discard_staged_open"):
+                                self._discard_staged_open(symbol)
+                            await self.db.log_blocked_trade(
+                                user_id=self.user_id,
+                                market_type=self.market_type,
+                                symbol=symbol,
+                                side=signal,
+                                strategy_key=self.strategy_key,
+                                position_scope_key=self.position_scope_key,
+                                reason_code="GLOBAL_EXPOSURE",
+                                reason_message=str(global_res.get("reason") or "Global exposure reservation failed"),
+                                details=global_res,
+                            )
+                            logger.info(f"[{self.name}] ⛔ {symbol}: {global_res.get('reason')}")
+                            self.risk.open_trade_count = await self.db.release_trade_slot(self.user_id, self.market_type)
+                            return
+                        exposure_reservation_id = global_res.get("reservation_id")
+                    except Exception as e:
+                        logger.warning(f"[{self.name}] ⚠️  Global exposure reservation failed for {symbol}: {e}")
+                        if hasattr(self, "_discard_staged_open"):
+                            self._discard_staged_open(symbol)
+                        self.risk.open_trade_count = await self.db.release_trade_slot(self.user_id, self.market_type)
+                        return
+
                 staged = getattr(self, "_staged_open", {}).get(symbol, {})
                 if staged is not None:
                     staged.update({
@@ -1130,6 +1228,7 @@ class BaseAlgo(ABC):
                         fee_rate=float(self.config.get("fee_rate", 0.001)),
                         strategy_key=self.strategy_key,
                         position_scope_key=self.position_scope_key,
+                        exposure_reservation_id=exposure_reservation_id,
                         metadata=getattr(self, "_staged_open", {}).get(symbol),
                     )
                     if trade_id:
@@ -1143,14 +1242,25 @@ class BaseAlgo(ABC):
                             self._discard_staged_open(symbol)
                         self.risk.open_trade_count = await self.db.release_trade_slot(self.user_id, self.market_type)
                 else:
-                    opened = await self._execute_live_trade(symbol, signal, quantity, price, trade_plan)
+                    opened = await self._execute_live_trade(symbol, signal, quantity, price, trade_plan, exposure_reservation_id=exposure_reservation_id)
                     if not opened:
+                        if exposure_reservation_id:
+                            try:
+                                await self.db.release_global_exposure_reservation(exposure_reservation_id)
+                            except Exception:
+                                logger.exception("Failed to release exposure reservation after failed open")
                         self.risk.open_trade_count = await self.db.release_trade_slot(self.user_id, self.market_type)
 
                 slot_reserved = False
         except Exception as e:
             if slot_reserved and not isinstance(e, TradePersistenceError):
                 self.risk.open_trade_count = await self.db.release_trade_slot(self.user_id, self.market_type)
+            # Release exposure reservation if present
+            if exposure_reservation_id:
+                try:
+                    await self.db.release_global_exposure_reservation(exposure_reservation_id)
+                except Exception:
+                    logger.exception("Failed to release exposure reservation in error path")
             if hasattr(self, "_discard_staged_open"):
                 self._discard_staged_open(symbol)
             logger.error(f"[{self.name}] ❌ Symbol {symbol} error: {e}", exc_info=True)
@@ -1349,6 +1459,7 @@ class BaseAlgo(ABC):
         quantity: float,
         price: float,
         trade_plan: Dict[str, float],
+        exposure_reservation_id: Optional[str] = None,
     ) -> bool:
         leverage = 1
         staged = getattr(self, "_staged_open", {}).get(symbol, {})
@@ -1507,6 +1618,7 @@ class BaseAlgo(ABC):
                 take_profit=actual_trade_plan["take_profit"],
                 order_id=order_id,
                 stop_loss_order_id=order.get("stopLossOrderId") or None,
+                exposure_reservation_id=exposure_reservation_id,
             )
 
             if trade_id:
@@ -1691,6 +1803,7 @@ class BaseAlgo(ABC):
         order_id: str,
         metadata: Optional[dict] = None,
         stop_loss_order_id: Optional[str] = None,
+        exposure_reservation_id: Optional[str] = None,
     ) -> Optional[str]:
         import asyncio
 
@@ -1711,6 +1824,7 @@ class BaseAlgo(ABC):
                     position_scope_key=self.position_scope_key,
                     metadata=getattr(self, "_staged_open", {}).get(symbol),
                     stop_loss_order_id=stop_loss_order_id,
+                    exposure_reservation_id=exposure_reservation_id,
                 )
             except Exception as e:
                 last_error = e
@@ -1741,6 +1855,7 @@ class BaseAlgo(ABC):
             "exchange_name": self.connector.exchange_name,
             "fee_rate": fee_rate,
             "stop_loss_order_id": stop_loss_order_id,
+            "exposure_reservation_id": exposure_reservation_id,
             "retry_count": 0,
             "last_error": str(last_error)[:300] if last_error else "unknown",
             "spooled_at": datetime.utcnow().isoformat(),

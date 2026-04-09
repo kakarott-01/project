@@ -346,6 +346,22 @@ class BotScheduler:
     # ── Internal ───────────────────────────────────────────────────────────────
 
     async def _stop_jobs(self, user_id: str):
+        ctx = self.active_bots.get(user_id)
+        if not ctx:
+            return
+
+        # Persist any per-market risk manager state before removing jobs.
+        try:
+            for market, rm in list(ctx.risk_managers.items()):
+                try:
+                    await rm.persist_state(self._db, user_id, market)
+                    logger.info(f"💾 Persisted risk state for user={user_id[:8]} market={market}")
+                except Exception as e:
+                    logger.warning(f"⚠️  Could not persist risk state for user={user_id[:8]} market={market}: {e}")
+        except Exception as e:
+            logger.warning(f"⚠️  Error while persisting risk managers before stop for user={user_id[:8]}: {e}")
+
+        # Now remove scheduled jobs and clear the active bot context
         ctx = self.active_bots.pop(user_id, None)
         if not ctx:
             return

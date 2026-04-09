@@ -535,6 +535,17 @@ export const riskEvents = pgTable('risk_events', {
   eventTypeIdx: index('risk_events_type_idx').on(t.userId, t.eventType, t.createdAt),
 }))
 
+// ─── Global Exposure Reservations (ephemeral) ─────────────────────────────────
+export const globalExposureReservations = pgTable('global_exposure_reservations', {
+  id:        uuid('id').defaultRandom().primaryKey(),
+  userId:    uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  amount:    decimal('amount', { precision: 20, scale: 8 }).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  expiresAt: timestamp('expires_at'),
+}, (t) => ({
+  userIdx: index('global_exposure_reservations_user_idx').on(t.userId, t.createdAt),
+}))
+
 // ─── Relations ────────────────────────────────────────────────────────────────
 export const usersRelations = relations(users, ({ many, one }) => ({
   sessions:           many(sessions),
@@ -555,6 +566,7 @@ export const usersRelations = relations(users, ({ many, one }) => ({
   riskStates:         many(riskState),
   reconciliationLogs: many(reconciliationLog),
   blockedTrades:      many(blockedTrades),
+  globalExposureReservations: many(globalExposureReservations),
   riskEvents:         many(riskEvents),
   botStatus:          one(botStatuses,  { fields: [users.id], references: [botStatuses.userId] }),
   riskSettings:       one(riskSettings, { fields: [users.id], references: [riskSettings.userId] }),
@@ -623,3 +635,4 @@ export type StrategyConfigSnapshot = typeof strategyConfigs.$inferSelect
 export type StrategyPosition = typeof strategyPositions.$inferSelect
 export type StrategyPerformanceRow = typeof strategyPerformance.$inferSelect
 export type BacktestResult = typeof backtestResults.$inferSelect
+export type GlobalExposureReservation = typeof globalExposureReservations.$inferSelect
