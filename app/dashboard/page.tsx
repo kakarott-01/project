@@ -1,5 +1,6 @@
 'use client'
 import { useQuery } from '@tanstack/react-query'
+import { QUERY_KEYS } from '@/lib/query-keys'
 import {
   TrendingUp, TrendingDown, Activity, DollarSign,
   BarChart3, Layers, ArrowUpRight,
@@ -124,27 +125,27 @@ function BotStatusCard({
 // ── Main dashboard page ───────────────────────────────────────────────────────
 export default function DashboardPage() {
   const { data: summaryData } = useQuery({
-    queryKey: ['trades-summary'],
+    queryKey: QUERY_KEYS.TRADES_SUMMARY,
     queryFn:  () => apiFetch<TradesSummaryResponse>('/api/trades/summary'),
     refetchInterval: 15_000,
   })
 
   const { data: perfData } = useQuery({
-    queryKey: ['performance-chart'],
+    queryKey: QUERY_KEYS.PERFORMANCE_CHART,
     queryFn:  () => apiFetch<PerformanceResponse>('/api/performance'),
     staleTime: 60_000,
     refetchInterval: 60_000,
   })
 
   const { data: tradesData } = useQuery({
-    queryKey: ['trades'],
+    queryKey: QUERY_KEYS.TRADES(),
     queryFn:  () => apiFetch<TradesResponse>('/api/trades?limit=50'),
   })
 
   const { data: botData, isLoading: botLoading } = useBotStatusQuery()
 
   const { data: strategyConfigData } = useQuery({
-    queryKey: ['strategy-configs'],
+    queryKey: QUERY_KEYS.STRATEGY_CONFIGS,
     queryFn:  () => apiFetch<StrategyConfigListResponse>('/api/strategy-config'),
     staleTime: 30_000,
   })

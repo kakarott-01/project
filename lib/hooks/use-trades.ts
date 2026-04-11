@@ -1,6 +1,7 @@
 'use client'
 
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { QUERY_KEYS } from '@/lib/query-keys'
 import { apiFetch } from '@/lib/api-client'
 import { useCallback } from 'react'
 
@@ -54,7 +55,7 @@ export default function useTrades({ market = 'all', status = 'all', mode = 'all'
   }, [market, status, mode])
 
   const { data, isLoading, refetch } = useQuery<TradesResponse>({
-    queryKey: ['trades', market, status, mode, page],
+    queryKey: QUERY_KEYS.TRADES({ market, status, mode, page }),
     queryFn:  () => apiFetch<TradesResponse>(`/api/trades?${buildParams(page)}`),
     staleTime: 15_000,
     placeholderData: (prev: any) => prev,
@@ -62,7 +63,7 @@ export default function useTrades({ market = 'all', status = 'all', mode = 'all'
 
   const prefetchPage = useCallback((p: number) => {
     qc.prefetchQuery({
-      queryKey: ['trades', market, status, mode, p],
+      queryKey: QUERY_KEYS.TRADES({ market, status, mode, page: p }),
       queryFn:  () => apiFetch<TradesResponse>(`/api/trades?${buildParams(p)}`),
       staleTime: 30_000,
     })

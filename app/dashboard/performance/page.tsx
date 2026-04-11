@@ -2,6 +2,7 @@
 
 import { useState, type ElementType } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { QUERY_KEYS } from '@/lib/query-keys'
 import dynamic from 'next/dynamic'
 const PerformanceCharts = dynamic(() => import('@/components/charts/performance-charts'), { ssr: false })
 import { apiFetch } from '@/lib/api-client'
@@ -125,13 +126,13 @@ export default function PerformancePage() {
   if (market !== 'all') params.set('market', market)
 
   const { data, isLoading } = useQuery<PerformanceResponse>({
-    queryKey: ['performance', mode, market],
+    queryKey: QUERY_KEYS.PERFORMANCE({ mode, market }),
     queryFn: () => apiFetch<PerformanceResponse>(`/api/performance?${params}`),
     staleTime: 30_000,
   })
 
   const { data: dailyData, isLoading: dailyLoading } = useQuery<DailyData>({
-    queryKey: ['daily-pnl', mode, market],
+    queryKey: QUERY_KEYS.DAILY_PNL({ mode, market }),
     queryFn: () => apiFetch(`/api/daily-pnl?${params}`),
     staleTime: 30_000,
   })

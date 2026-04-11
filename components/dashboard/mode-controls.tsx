@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { QUERY_KEYS } from '@/lib/query-keys'
 import { BOT_STATUS_QUERY_KEY, isValidBotSnapshot } from '@/lib/bot-status-client'
 import {
   AlertTriangle, Shield, Clock, CheckCircle,
@@ -59,7 +60,7 @@ const ModePaperConfirmModal = dynamic(() => import('@/components/modals/mode-pap
 function AuditLog() {
   const [open, setOpen] = useState(false)
   const { data, isLoading } = useQuery({
-    queryKey: ['mode-audit'],
+    queryKey: QUERY_KEYS.MODE_AUDIT,
     queryFn:  () => apiFetch<AuditLogResponse>('/api/mode/audit?limit=10'),
     enabled:  open,
   })
@@ -133,13 +134,13 @@ export function ModeControls() {
   } | null>(null)
 
   const { data: meData } = useQuery({
-    queryKey: ['me'],
+    queryKey: QUERY_KEYS.ME,
     queryFn:  () => apiFetch<MeResponse>('/api/me'),
     staleTime: Infinity,
   })
 
   const { data, isLoading } = useQuery<ModesResponse>({
-    queryKey:        ['market-modes'],
+    queryKey:        QUERY_KEYS.MARKET_MODES,
     queryFn:         () => apiFetch('/api/mode'),
     refetchInterval: 10_000,
   })
@@ -150,10 +151,10 @@ export function ModeControls() {
     },
     onMutate: async ({ marketType, toMode }) => {
       await qc.cancelQueries({ queryKey: BOT_STATUS_QUERY_KEY })
-      await qc.cancelQueries({ queryKey: ['market-modes'] })
+      await qc.cancelQueries({ queryKey: QUERY_KEYS.MARKET_MODES })
       const previousBot = qc.getQueryData(BOT_STATUS_QUERY_KEY)
-      const previous = qc.getQueryData(['market-modes'])
-      qc.setQueryData(['market-modes'], (old: any) => {
+      const previous = qc.getQueryData(QUERY_KEYS.MARKET_MODES as any)
+      qc.setQueryData(QUERY_KEYS.MARKET_MODES as any, (old: any) => {
         if (!old || !old.markets) return old
         return { ...old, markets: old.markets.map((m: any) => m.marketType === marketType ? { ...m, mode: toMode } : m) }
       })
@@ -161,11 +162,11 @@ export function ModeControls() {
     },
     onError: (err: Error, _vars, context: any) => {
       console.error('Mode switch failed:', err.message)
-      if (context?.previous) qc.setQueryData(['market-modes'], context.previous)
+      if (context?.previous) qc.setQueryData(QUERY_KEYS.MARKET_MODES as any, context.previous)
       if (context?.previousBot && isValidBotSnapshot(context.previousBot)) qc.setQueryData(BOT_STATUS_QUERY_KEY, context.previousBot)
     },
     onSettled: () => {
-      qc.invalidateQueries({ queryKey: ['market-modes'] })
+      qc.invalidateQueries({ queryKey: QUERY_KEYS.MARKET_MODES })
       qc.invalidateQueries({ queryKey: BOT_STATUS_QUERY_KEY })
       setPending(null)
     },

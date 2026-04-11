@@ -16,6 +16,8 @@ export const QUERY_KEYS = {
   TRADES_SUMMARY: ['trades-summary'] as const,
   PERFORMANCE: (filters?: { mode?: string; market?: string }) =>
     filters ? ['performance', filters] : ['performance'],
+  // Backwards-compat alias used in several places for the dashboard chart
+  PERFORMANCE_CHART: ['performance-chart'] as const,
   DAILY_PNL: (filters?: { mode?: string; market?: string }) =>
     filters ? ['daily-pnl', filters] : ['daily-pnl'],
   BOT_HISTORY: (filters?: { page?: number; mode?: string; exchange?: string; from?: string; to?: string }) =>

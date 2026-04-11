@@ -27,6 +27,20 @@ interface Props {
   trades?: Trade[]
 }
 
+// Tooltip moved to module scope so it is not recreated on every render
+export function PnlCustomTooltip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null
+  const val = payload[0].value
+  return (
+    <div className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs shadow-xl">
+      <p className="text-gray-500 mb-0.5">{label}</p>
+      <p className={`font-semibold ${val >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+        {val >= 0 ? '+' : ''}₹{val.toLocaleString('en-IN')}
+      </p>
+    </div>
+  )
+}
+
 export function PnlChart({ cumPnlData, trades }: Props) {
 
   // Use pre-computed data if available, otherwise compute from trades (legacy path)
@@ -62,19 +76,6 @@ export function PnlChart({ cumPnlData, trades }: Props) {
 
   const isPositive = (data[data.length - 1]?.pnl ?? 0) >= 0
 
-  const CustomTooltip = ({ active, payload, label }: any) => {
-    if (!active || !payload?.length) return null
-    const val = payload[0].value
-    return (
-      <div className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs shadow-xl">
-        <p className="text-gray-500 mb-0.5">{label}</p>
-        <p className={`font-semibold ${val >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-          {val >= 0 ? '+' : ''}₹{val.toLocaleString('en-IN')}
-        </p>
-      </div>
-    )
-  }
-
   return (
     <ResponsiveContainer width="100%" height={180}>
       <AreaChart data={data} margin={{ top: 5, right: 5, bottom: 0, left: 0 }}>
@@ -95,7 +96,7 @@ export function PnlChart({ cumPnlData, trades }: Props) {
           tickFormatter={v => `₹${v >= 1000 ? (v/1000).toFixed(1)+'k' : v}`}
           width={55}
         />
-        <Tooltip content={<CustomTooltip />} />
+        <Tooltip content={<PnlCustomTooltip />} />
         <ReferenceLine y={0} stroke="#374151" strokeDasharray="3 3" />
         <Area
           type="monotone" dataKey="pnl"

@@ -3,13 +3,15 @@ import { QueryCache, QueryClient, QueryClientProvider } from '@tanstack/react-qu
 import { useState } from 'react'
 import { ToastViewport } from '@/components/ui/toast-viewport'
 import { useToastStore } from '@/lib/toast-store'
+import { QUERY_KEYS } from '@/lib/query-keys'
 
 // Financial queries that must NOT use stale placeholder data
 const FINANCIAL_QUERY_KEYS = new Set([
-  'trades-summary',
-  'performance',
-  'daily-pnl',
-  'trades',
+  // Use the canonical keys from QUERY_KEYS so changes remain centralized
+  QUERY_KEYS.TRADES_SUMMARY[0],
+  QUERY_KEYS.PERFORMANCE().at(0)!,
+  QUERY_KEYS.DAILY_PNL().at(0)!,
+  QUERY_KEYS.TRADES().at(0)!,
 ])
 
 // Track if we've already shown the session expired toast to prevent spam

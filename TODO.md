@@ -43,6 +43,10 @@ Already implemented / partially implemented (no immediate action required)
 - [x] `TradeTable` typed interface added (`components/dashboard/trade-table.tsx`).
 - [x] `providers`: `placeholderData` logic updated to avoid showing stale financial data (`components/providers.tsx`).
 - [x] `useBotStatusQuery` poll tuning (8s while running, 15s otherwise) to reduce DB pressure (`lib/use-bot-status-query.ts`).
+- [x] Replace remaining client-side raw `fetch()` calls with the central `apiFetch()` wrapper across client components. (Examples: `components/dashboard/bot-controls.tsx`, `components/dashboard/strategy-settings.tsx`, `app/dashboard/markets/page.tsx`, various hooks)
+- [x] Extract OTP/reveal modal network logic into hooks: `lib/hooks/use-exchange-otp.ts` and `lib/hooks/use-mode-otp.ts`. Updated `components/modals/otp-modal.tsx`, `components/modals/mode-otp-modal.tsx`, and `app/dashboard/markets/page.tsx` to use the hooks and new `onVerified(data?)` flow.
+- [x] Add explicit response typings and fix missing `apiFetch` imports across multiple files to resolve TypeScript errors; production build now succeeds.
+- [x] Extract Recharts charts from `app/dashboard/performance/page.tsx` into a dynamically imported component: `components/charts/performance-charts.tsx` (reduces initial bundle size).
 
 Notes
 - Mark each task with an owner and PR link when assigning.
@@ -55,5 +59,5 @@ Generated/updated by the audit assistant on 2026-04-11.
 - Items marked `[ ]` are pending.
 - The `Database & Migrations audit` task is currently in-progress and tracked in CI/automation.
 
-Generated/updated by the audit assistant on 2026-04-10.
+Generated/updated by the audit assistant on 2026-04-11.
  

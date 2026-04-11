@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { QUERY_KEYS } from '@/lib/query-keys'
 import { BOT_STATUS_QUERY_KEY, isValidBotSnapshot } from '@/lib/bot-status-client'
 import { useTradingGuard } from '@/lib/use-trading-guard'
 import { AlertTriangle, Shield, Sparkles } from 'lucide-react'
@@ -120,12 +121,13 @@ export default function SettingsPage() {
   const { isRunning } = useTradingGuard()
 
   const { data } = useQuery<RiskSettingsResponse | null>({
-    queryKey: ['risk-settings'],
+    queryKey: QUERY_KEYS.RISK_SETTINGS,
     queryFn: () => apiFetch<RiskSettingsResponse>('/api/risk-settings'),
   })
 
   useEffect(() => {
     if (data && Object.keys(data).length) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setForm({
         maxPositionPct: Number(data.maxPositionPct ?? defaults.maxPositionPct),
         stopLossPct: Number(data.stopLossPct ?? defaults.stopLossPct),
@@ -148,13 +150,13 @@ export default function SettingsPage() {
     },
     onMutate: async () => {
       await qc.cancelQueries({ queryKey: BOT_STATUS_QUERY_KEY })
-      await qc.cancelQueries({ queryKey: ['risk-settings'] })
+      await qc.cancelQueries({ queryKey: QUERY_KEYS.RISK_SETTINGS })
       const previousBot = qc.getQueryData(BOT_STATUS_QUERY_KEY)
-      const previous = qc.getQueryData(['risk-settings'])
+      const previous = qc.getQueryData(QUERY_KEYS.RISK_SETTINGS as any)
       return { previous, previousBot }
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['risk-settings'] })
+      qc.invalidateQueries({ queryKey: QUERY_KEYS.RISK_SETTINGS })
       pushToast({
         tone: 'success',
         title: 'Global risk controls saved',
@@ -162,7 +164,7 @@ export default function SettingsPage() {
       })
     },
     onError: (error: Error, _vars, context: any) => {
-      if (context?.previous) qc.setQueryData(['risk-settings'], context.previous)
+      if (context?.previous) qc.setQueryData(QUERY_KEYS.RISK_SETTINGS as any, context.previous)
       if (context?.previousBot && isValidBotSnapshot(context.previousBot)) qc.setQueryData(BOT_STATUS_QUERY_KEY, context.previousBot)
       pushToast({
         tone: 'error',

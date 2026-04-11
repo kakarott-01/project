@@ -1,6 +1,6 @@
 'use client'
 
-import { useMutationState } from '@tanstack/react-query'
+import { useMutationState, useQueryClient } from '@tanstack/react-query'
 import { LogOut, Bell, Menu, AlertTriangle, X } from 'lucide-react'
 import { useState } from 'react'
 import { useEffect } from 'react'
@@ -8,6 +8,7 @@ import { MobileSidebar } from '@/components/dashboard/sidebar'
 import { useBotStatusQuery } from '@/lib/use-bot-status-query'
 import { formatElapsedDuration, getSessionDurationMs } from '@/lib/time'
 import { apiFetch } from '@/lib/api-client'
+import { QUERY_KEYS } from '@/lib/query-keys'
 
 interface TopBarProps {
   user?: {
@@ -42,6 +43,8 @@ export function TopBar({ user }: TopBarProps) {
 
   const { data: botData, isLoading: botLoading } = useBotStatusQuery()
 
+  const qc = useQueryClient()
+
   const pendingStarts = useMutationState({
     filters: { mutationKey: ['bot-start'], status: 'pending' },
     select: (mutation) => mutation.state.variables as { markets?: string[] } | undefined,
@@ -75,6 +78,8 @@ export function TopBar({ user }: TopBarProps) {
     } catch {
       // Best effort
     } finally {
+      // clear relevant cache to avoid stale user data after logout
+      try { qc.removeQueries({ queryKey: QUERY_KEYS.ME }) } catch (_) { qc.removeQueries() }
       window.location.href = '/login'
     }
   }

@@ -6,6 +6,7 @@ import {
   BOT_STATUS_QUERY_KEY,
   isValidBotSnapshot,
 } from "@/lib/bot-status-client";
+import { QUERY_KEYS } from "@/lib/query-keys";
 import {
   AlertTriangle,
   ChevronDown,
@@ -251,46 +252,58 @@ export function StrategySettings() {
   const [expandedMarkets, setExpandedMarkets] = useState<Set<string>>(
     new Set(),
   );
+  // ── NEW: track which market configs have unsaved user edits
+  const [dirtyMarkets, setDirtyMarkets] = useState<Set<string>>(new Set());
 
   const { data: strategyData, isLoading: strategiesLoading } = useQuery<StrategyCatalogResponse>({
-    queryKey: ["strategy-catalog"],
+    queryKey: QUERY_KEYS.STRATEGY_CATALOG,
     queryFn: () => apiFetch<StrategyCatalogResponse>('/api/strategies'),
   });
 
   const { data: configData, isLoading: configsLoading } = useQuery<StrategyConfigDataResponse>({
-    queryKey: ["strategy-configs"],
+    queryKey: QUERY_KEYS.STRATEGY_CONFIGS,
     queryFn: () => apiFetch<StrategyConfigDataResponse>('/api/strategy-config'),
     staleTime: 30_000, // Match bot-controls.tsx — consistent cache behavior across subscribers
   });
 
   const { data: riskData } = useQuery<RiskSettingsResponse>({
-    queryKey: ["risk-settings"],
+    queryKey: QUERY_KEYS.RISK_SETTINGS,
     queryFn: () => apiFetch<RiskSettingsResponse>('/api/risk-settings'),
   });
 
   const { data: botData } = useBotStatusQuery();
 
   useEffect(() => {
-    if (configData?.markets) {
-      const next: Record<string, RuntimeConfig> = {};
-      for (const market of configData.markets) {
-        next[market.marketType] = {
-          executionMode: market.executionMode,
-          positionMode: market.positionMode ?? "NET",
-          allowHedgeOpposition: market.allowHedgeOpposition ?? false,
-          conflictBlocking: market.conflictBlocking ?? false,
-          maxPositionsPerSymbol: market.maxPositionsPerSymbol ?? 2,
-          maxCapitalPerStrategyPct: market.maxCapitalPerStrategyPct ?? 25,
-          maxDrawdownPct: market.maxDrawdownPct ?? 12,
-          strategyKeys: market.strategyKeys,
-          strategySettings: market.strategySettings ?? {},
-          conflictWarnings: market.conflictWarnings ?? [],
-          exchangeCapabilities: market.exchangeCapabilities ?? null,
-        };
+    if (!configData?.markets) return
+
+    const markets = configData.markets
+
+    setConfigs(prev => {
+      const next = { ...prev }
+
+      for (const market of markets) {
+        if (!dirtyMarkets.has(market.marketType)) {
+          next[market.marketType] = {
+            executionMode: market.executionMode,
+            positionMode: market.positionMode ?? "NET",
+            allowHedgeOpposition: market.allowHedgeOpposition ?? false,
+            conflictBlocking: market.conflictBlocking ?? false,
+            maxPositionsPerSymbol: market.maxPositionsPerSymbol ?? 2,
+            maxCapitalPerStrategyPct: market.maxCapitalPerStrategyPct ?? 25,
+            maxDrawdownPct: market.maxDrawdownPct ?? 12,
+            strategyKeys: market.strategyKeys,
+            strategySettings: market.strategySettings ?? {},
+            conflictWarnings: market.conflictWarnings ?? [],
+            exchangeCapabilities: market.exchangeCapabilities ?? null,
+          }
+        }
       }
-      setConfigs(next);
-    }
-  }, [configData]);
+
+      return next
+    })
+    // Intentionally only re-run when fresh config data arrives
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configData])
 
   const saveMutation = useMutation({
     mutationFn: async ({ marketType, config, aggressiveConfirmed }: { marketType: MarketId; config: RuntimeConfig; aggressiveConfirmed: boolean }) => {
@@ -315,13 +328,18 @@ export function StrategySettings() {
     onMutate: async ({ marketType }) => {
       setSavingMarket(marketType);
       await qc.cancelQueries({ queryKey: BOT_STATUS_QUERY_KEY });
-      await qc.cancelQueries({ queryKey: ["strategy-configs"] });
+      await qc.cancelQueries({ queryKey: QUERY_KEYS.STRATEGY_CONFIGS });
       const previousBot = qc.getQueryData(BOT_STATUS_QUERY_KEY);
-      const previous = qc.getQueryData(["strategy-configs"]);
+      const previous = qc.getQueryData(QUERY_KEYS.STRATEGY_CONFIGS as any);
       return { previous, previousBot };
     },
     onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: ["strategy-configs"] });
+      qc.invalidateQueries({ queryKey: QUERY_KEYS.STRATEGY_CONFIGS });
+      setDirtyMarkets(prev => {
+        const copy = new Set(prev)
+        copy.delete(variables.marketType)
+        return copy
+      })
       pushToast({
         tone: "success",
         title: `${MARKETS.find((item) => item.id === variables.marketType)?.label ?? variables.marketType} saved`,
@@ -330,7 +348,7 @@ export function StrategySettings() {
     },
     onError: (error: Error, _vars, context: any) => {
       if (context?.previous)
-        qc.setQueryData(["strategy-configs"], context.previous);
+        qc.setQueryData(QUERY_KEYS.STRATEGY_CONFIGS as any, context.previous);
       if (context?.previousBot && isValidBotSnapshot(context.previousBot))
         qc.setQueryData(BOT_STATUS_QUERY_KEY, context.previousBot);
       pushToast({
@@ -370,6 +388,12 @@ export function StrategySettings() {
     marketType: MarketId,
     updater: (current: RuntimeConfig) => RuntimeConfig,
   ) {
+    // mark this market as dirty so local edits aren't clobbered by refetches
+    setDirtyMarkets((prev) => {
+      const copy = new Set(prev)
+      copy.add(marketType)
+      return copy
+    })
     setConfigs((previous) => {
       const current = previous[marketType] ?? {
         executionMode: "SAFE",

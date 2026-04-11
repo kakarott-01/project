@@ -2,6 +2,7 @@
 import { useState, useCallback } from 'react'
 import { apiFetch } from '@/lib/api-client'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { QUERY_KEYS } from '@/lib/query-keys'
 import { BOT_STATUS_QUERY_KEY, isValidBotSnapshot } from '@/lib/bot-status-client'
 import {
   Clock, Trash2, ChevronLeft, ChevronRight,
@@ -240,7 +241,7 @@ export default function BotHistoryPage() {
   if (toDate)               params.set('to', toDate)
 
   const { data, isLoading } = useQuery<{ sessions: BotSession[]; pagination: Pagination }>({
-    queryKey: ['bot-history', page, modeFilter, exchFilter, fromDate, toDate],
+    queryKey: QUERY_KEYS.BOT_HISTORY({ page, mode: modeFilter, exchange: exchFilter, from: fromDate, to: toDate }),
     queryFn:  () => apiFetch(`/api/bot-history?${params}`),
   })
 
@@ -248,22 +249,22 @@ export default function BotHistoryPage() {
     mutationFn: (id: string) => apiFetch(`/api/bot-history/${id}`, { method: 'DELETE' }),
     onMutate: async (id: string) => {
       await qc.cancelQueries({ queryKey: BOT_STATUS_QUERY_KEY })
-      await qc.cancelQueries({ queryKey: ['bot-history'] })
+      await qc.cancelQueries({ queryKey: QUERY_KEYS.BOT_HISTORY() })
       const previousBot = qc.getQueryData(BOT_STATUS_QUERY_KEY)
-      const previous = qc.getQueryData(['bot-history', page, modeFilter, exchFilter, fromDate, toDate])
-      qc.setQueryData(['bot-history', page, modeFilter, exchFilter, fromDate, toDate], (old: any) => {
+      const previous = qc.getQueryData(QUERY_KEYS.BOT_HISTORY({ page, mode: modeFilter, exchange: exchFilter, from: fromDate, to: toDate }) as any)
+      qc.setQueryData(QUERY_KEYS.BOT_HISTORY({ page, mode: modeFilter, exchange: exchFilter, from: fromDate, to: toDate }) as any, (old: any) => {
         if (!old || !old.sessions) return old
         return { ...old, sessions: old.sessions.filter((s: any) => s.id !== id) }
       })
       return { previous, previousBot }
     },
     onError: (_err, _vars, context: any) => {
-      if (context?.previous) qc.setQueryData(['bot-history', page, modeFilter, exchFilter, fromDate, toDate], context.previous)
+      if (context?.previous) qc.setQueryData(QUERY_KEYS.BOT_HISTORY({ page, mode: modeFilter, exchange: exchFilter, from: fromDate, to: toDate }) as any, context.previous)
       if (context?.previousBot && isValidBotSnapshot(context.previousBot)) qc.setQueryData(BOT_STATUS_QUERY_KEY, context.previousBot)
       showToast('Failed to delete session', 'error')
     },
     onSettled: () => {
-      qc.invalidateQueries({ queryKey: ['bot-history'] })
+      qc.invalidateQueries({ queryKey: QUERY_KEYS.BOT_HISTORY() })
       qc.invalidateQueries({ queryKey: BOT_STATUS_QUERY_KEY })
       setToDelete(null)
     },

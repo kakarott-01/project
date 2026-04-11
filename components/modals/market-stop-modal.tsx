@@ -42,7 +42,7 @@ export default function MarketStopModal({ market, isLive, openTradeCount, onDrai
         <div className="px-5 py-5 space-y-3">
           {isLive && openTradeCount > 0 && (
             <InlineAlert tone="danger" title="Live positions need manual supervision if unmonitored.">
-              After stopping, open positions won't have automated SL/TP until you restart or close them.
+              After stopping, open positions will not have automated SL/TP until you restart or close them.
             </InlineAlert>
           )}
 

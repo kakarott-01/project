@@ -3,6 +3,7 @@
 import { useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useBotStatusQuery } from '@/lib/use-bot-status-query'
+import { QUERY_KEYS } from '@/lib/query-keys'
 import {
   AlertTriangle, Loader2, Power, ShieldAlert, Square,
   X, Zap, Play, Swords, Shield,
@@ -106,13 +107,13 @@ export function BotControls({ botData }: { botData: any }) {
   const [stopModal, setStopModal]                 = useState<{ market: MarketId; openTrades: number } | null>(null)
 
   const { data: modeData } = useQuery({
-    queryKey: ['market-modes'],
+    queryKey: QUERY_KEYS.MARKET_MODES,
     queryFn:  () => apiFetch<ModeDataResponse>('/api/mode'),
     staleTime: 30_000,
   })
 
   const { data: strategyConfigData } = useQuery({
-    queryKey: ['strategy-configs'],
+    queryKey: QUERY_KEYS.STRATEGY_CONFIGS,
     queryFn:  () => apiFetch<StrategyConfigDataResponse>('/api/strategy-config'),
     staleTime: 30_000,
   })
@@ -186,7 +187,7 @@ export function BotControls({ botData }: { botData: any }) {
         vars.markets.forEach((m) => unlockAction(`start-market:${m}`))
       }
       await qc.invalidateQueries({ queryKey: BOT_STATUS_QUERY_KEY })
-      qc.invalidateQueries({ queryKey: ['bot-history'] })
+      qc.invalidateQueries({ queryKey: QUERY_KEYS.BOT_HISTORY() })
     },
   })
 
@@ -225,7 +226,7 @@ export function BotControls({ botData }: { botData: any }) {
       setShowStopAllModal(false)
       if (vars) unlockAction(`stop-all:${vars}`)
       await qc.invalidateQueries({ queryKey: BOT_STATUS_QUERY_KEY })
-      qc.invalidateQueries({ queryKey: ['bot-history'] })
+      qc.invalidateQueries({ queryKey: QUERY_KEYS.BOT_HISTORY() })
     },
   })
 
@@ -266,7 +267,7 @@ export function BotControls({ botData }: { botData: any }) {
       setStopModal(null)
       isFiringRef.current = false
       await qc.invalidateQueries({ queryKey: BOT_STATUS_QUERY_KEY })
-      qc.invalidateQueries({ queryKey: ['bot-history'] })
+      qc.invalidateQueries({ queryKey: QUERY_KEYS.BOT_HISTORY() })
     },
   })
 

@@ -1,7 +1,8 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { apiFetch } from '@/lib/api-client'
+import { QUERY_KEYS } from '@/lib/query-keys'
 
-export const BOT_STATUS_QUERY_KEY = ['bot-status'] as const
+export const BOT_STATUS_QUERY_KEY = QUERY_KEYS.BOT_STATUS
 // FIX: Increased from 5s to 8s to reduce Neon connection pressure
 export const BOT_STATUS_POLL_INTERVAL_MS = 8_000
 

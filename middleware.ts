@@ -28,7 +28,8 @@ export async function middleware(req: NextRequest) {
       }
     : null
 
-  const session = cookieSession ?? tokenSession
+  // prefer a fresh JWT/token-derived session over an older cookie session
+  const session = tokenSession ?? cookieSession
 
   // ❌ Not logged in → LOGIN
   if (!session?.id) {

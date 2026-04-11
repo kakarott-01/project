@@ -1,6 +1,7 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { QUERY_KEYS } from '@/lib/query-keys'
 import { apiFetch } from '@/lib/api-client'
 import dynamic from 'next/dynamic'
 const OtpModal = dynamic(() => import('@/components/modals/otp-modal'), { ssr: false })
@@ -260,7 +261,7 @@ function ExchangeForm({ exch, marketId, prefill, onSaved, onCancel, isEdit }: Ex
 
       setSaved(true);
       setIsDirty(false);
-      qc.invalidateQueries({ queryKey: ["exchange-apis"] });
+      qc.invalidateQueries({ queryKey: QUERY_KEYS.EXCHANGE_APIS });
       setTimeout(() => { onSaved(); }, 1200);
     } catch (err: any) {
       setError(err?.message ?? "Failed to save keys");
@@ -442,7 +443,7 @@ export default function MarketsPage() {
   const [editOtpModal,  setEditOtpModal]  = useState<{ marketId: string; exchId: string } | null>(null);
 
   const { data: existingApis } = useQuery<SavedApi[]>({
-    queryKey: ["exchange-apis"],
+    queryKey: QUERY_KEYS.EXCHANGE_APIS,
     queryFn:  () => apiFetch("/api/exchange"),
   });
 
@@ -453,7 +454,7 @@ export default function MarketsPage() {
   const activeMarkets: string[] = botData?.activeMarkets ?? [];
 
   const { data: meData } = useQuery<MeResponse | null>({
-    queryKey: ["me"],
+    queryKey: QUERY_KEYS.ME,
     queryFn:  () => apiFetch<MeResponse>("/api/me").catch(() => null),
     staleTime: Infinity,
   });
@@ -569,7 +570,7 @@ export default function MarketsPage() {
                       onSaved={() => {
                         setEditingKey(null);
                         setEditPrefill(null);
-                        qc.invalidateQueries({ queryKey: ["exchange-apis"] });
+                                        qc.invalidateQueries({ queryKey: QUERY_KEYS.EXCHANGE_APIS });
                       }}
                       onCancelEdit={() => {
                         setEditingKey(null);

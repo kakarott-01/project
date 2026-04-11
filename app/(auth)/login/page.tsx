@@ -276,7 +276,7 @@ export default function LoginPage() {
               <div style={{ width:'56px', height:'56px', borderRadius:'50%', background:'rgba(29,158,117,0.15)', display:'flex', alignItems:'center', justifyContent:'center', margin:'0 auto 16px' }}>
                 <svg width="28" height="28" fill="none" stroke="#1D9E75" strokeWidth={2.5} viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
               </div>
-              <h2 style={{ fontSize:'20px', fontWeight:600, color:'#f9fafb', margin:'0 0 6px' }}>You're in!</h2>
+              <h2 style={{ fontSize:'20px', fontWeight:600, color:'#f9fafb', margin:'0 0 6px' }}>You are in!</h2>
               <p style={{ fontSize:'13px', color:'#6b7280' }}>Redirecting to dashboard…</p>
             </div>
           )}
