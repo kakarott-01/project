@@ -132,51 +132,44 @@ export default function LoginPage() {
       document.getElementById(`otp-${idx-1}`)?.focus()
   }
 
-  const page:  React.CSSProperties = { minHeight:'100vh', background:'#030712', display:'flex', alignItems:'center', justifyContent:'center', padding:'1rem', fontFamily:'system-ui,-apple-system,sans-serif' }
-  const wrap:  React.CSSProperties = { width:'100%', maxWidth:'440px' }
-  const card:  React.CSSProperties = { background:'#111827', border:'1px solid #1f2937', borderRadius:'16px', padding:'28px' }
-  const btnPrimary: React.CSSProperties = { width:'100%', padding:'12px', background:'#1D9E75', border:'none', borderRadius:'10px', color:'white', fontSize:'14px', fontWeight:600, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:'8px', transition:'opacity 0.15s' }
-  const btnSecondary: React.CSSProperties = { width:'100%', padding:'11px', background:'transparent', border:'1px solid #374151', borderRadius:'10px', color:'#d1d5db', fontSize:'14px', fontWeight:500, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:'8px', marginBottom:'12px' }
-  const inputS: React.CSSProperties = { width:'100%', padding:'11px 14px', background:'#1f2937', border:'1px solid #374151', borderRadius:'10px', color:'#f9fafb', fontSize:'14px', outline:'none', boxSizing:'border-box' as 'border-box' }
-  const line: React.CSSProperties = { flex:1, height:'1px', background:'#1f2937' }
+  // Use Tailwind classes instead of inline style objects
 
   return (
-    <div style={page}>
-      <div style={wrap}>
+    <div className="min-h-screen bg-[#030712] flex items-center justify-center p-4 font-sans">
+      <div className="w-full max-w-[440px]">
         {/* Logo */}
-        <div style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:'10px', marginBottom:'2rem' }}>
-          <div style={{ width:'40px', height:'40px', borderRadius:'10px', background:'#1D9E75', display:'flex', alignItems:'center', justifyContent:'center' }}>
+        <div className="flex items-center justify-center gap-2.5 mb-8">
+          <div className="w-10 h-10 rounded-lg bg-[#1D9E75] flex items-center justify-center">
             <svg width="20" height="20" fill="none" stroke="white" strokeWidth={2.5} viewBox="0 0 24 24">
               <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/>
               <polyline points="16 7 22 7 22 13"/>
             </svg>
           </div>
-          <span style={{ fontSize:'22px', fontWeight:600, color:'#f9fafb' }}>UpBot</span>
+          <span className="text-[22px] font-semibold text-gray-100">UpBot</span>
         </div>
-
-        <div style={card}>
+        <div className="bg-[#111827] border border-[#1f2937] rounded-xl p-7">
           {tab === 'signup' && accessVerified && (
-            <div style={{ display:'flex', alignItems:'center', gap:'8px', background:'rgba(29,158,117,0.1)', border:'1px solid rgba(29,158,117,0.2)', borderRadius:'10px', padding:'10px 14px', marginBottom:'20px' }}>
+            <div className="flex items-center gap-2 bg-[#1d9e7530] border border-[#1d9e7530] rounded-lg px-3 py-2 mb-5">
               <svg width="16" height="16" fill="none" stroke="#1D9E75" strokeWidth={2.5} viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
-              <span style={{ fontSize:'13px', color:'#1D9E75', fontWeight:500 }}>Access code verified — you can sign up now</span>
+              <span className="text-sm text-[#1D9E75] font-medium">Access code verified — you can sign up now</span>
             </div>
           )}
 
           {/* Step: choose */}
           {step === 'choose' && (
             <>
-              <div style={{ display:'flex', background:'#1f2937', borderRadius:'10px', padding:'4px', marginBottom:'20px' }}>
+              <div className="flex bg-[#1f2937] rounded-lg p-1 mb-5">
                 {(['signin','signup'] as const).map(t => (
-                  <button key={t} onClick={() => setTab(t)} style={{ flex:1, padding:'8px', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:500, cursor:'pointer', background: tab===t ? '#374151' : 'transparent', color: tab===t ? '#f9fafb' : '#6b7280' }}>
+                  <button key={t} onClick={() => setTab(t)} className={`flex-1 px-3 py-2 rounded-md text-sm font-medium ${tab===t ? 'bg-[#374151] text-gray-100' : 'text-gray-500'}`}>
                     {t === 'signin' ? 'Sign in' : 'Create account'}
                   </button>
                 ))}
               </div>
 
-              <h1 style={{ fontSize:'20px', fontWeight:600, color:'#f9fafb', margin:'0 0 4px' }}>
+              <h1 className="text-[20px] font-semibold text-gray-100 mb-1">
                 {tab === 'signin' ? 'Welcome back' : 'Create your account'}
               </h1>
-              <p style={{ fontSize:'13px', color:'#6b7280', margin:'0 0 20px' }}>
+              <p className="text-sm text-gray-400 mb-5">
                 {tab === 'signin'
                   ? 'Enter email to request OTP.'
                   : 'Verify access code first, then request OTP.'}
@@ -184,7 +177,7 @@ export default function LoginPage() {
 
               {tab === 'signin' && (
                 <>
-                  <button onClick={handleGoogleLogin} disabled={loading} style={btnSecondary}>
+                  <button onClick={handleGoogleLogin} disabled={loading} className="w-full py-2.5 mb-3 border border-[#374151] rounded-lg text-[#d1d5db] text-sm font-medium flex items-center justify-center gap-2">
                     <svg width="18" height="18" viewBox="0 0 24 24">
                       <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
                       <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
@@ -194,44 +187,44 @@ export default function LoginPage() {
                     Continue with Google
                   </button>
 
-                  <div style={{ display:'flex', alignItems:'center', gap:'12px', margin:'16px 0' }}>
-                    <div style={line}/><span style={{ fontSize:'12px', color:'#4b5563' }}>or use email</span><div style={line}/>
+                  <div className="flex items-center gap-3 my-4">
+                    <div className="flex-1 h-px bg-[#1f2937]"/><span className="text-xs text-gray-500">or use email</span><div className="flex-1 h-px bg-[#1f2937]"/>
                   </div>
                 </>
               )}
 
               {tab === 'signup' && (
-                <div style={{ display:'flex', alignItems:'center', gap:'12px', margin:'16px 0' }}>
-                  <div style={line}/><span style={{ fontSize:'12px', color:'#4b5563' }}>Access code + email</span><div style={line}/>
+                <div className="flex items-center gap-3 my-4">
+                  <div className="flex-1 h-px bg-[#1f2937]"/><span className="text-xs text-gray-500">Access code + email</span><div className="flex-1 h-px bg-[#1f2937]"/>
                 </div>
               )}
 
               <form onSubmit={handleSendOtp}>
                 {tab === 'signup' && !accessVerified && (
                   <>
-                    <label style={{ display:'block', fontSize:'12px', color:'#9ca3af', fontWeight:500, marginBottom:'6px' }}>Access code</label>
-                    <div style={{ display:'flex', gap:'8px', marginBottom:'12px' }}>
-                      <input style={{ ...inputS, flex:1 }} type="text" placeholder="XXXX-XXXX-XXXX"
+                    <label className="block text-xs text-gray-400 font-medium mb-1">Access code</label>
+                    <div className="flex gap-2 mb-3">
+                      <input className="flex-1 px-3 py-2 bg-[#1f2937] border border-[#374151] rounded-lg text-gray-100 outline-none" type="text" placeholder="XXXX-XXXX-XXXX"
                         value={accessCode} onChange={e => setAccessCode(e.target.value)} />
                       <button type="button" onClick={handleVerifyAccessCode}
                         disabled={loading || !accessCode}
-                        style={{ padding:'10px 12px', border:'none', borderRadius:'10px', background:'#1D9E75', color:'white', cursor: loading || !accessCode ? 'not-allowed' : 'pointer' }}>
+                        className="px-3 py-2 rounded-lg bg-[#1D9E75] text-white" >
                         Verify
                       </button>
                     </div>
-                    {accessError && <p style={{ color:'#f87171', fontSize:'13px', marginBottom:'10px' }}>{accessError}</p>}
+                    {accessError && <p className="text-sm text-red-400 mb-3">{accessError}</p>}
                   </>
                 )}
 
-                <label style={{ display:'block', fontSize:'12px', color:'#9ca3af', fontWeight:500, marginBottom:'6px' }}>Email address</label>
-                <input style={{ ...inputS, marginBottom:'12px' }} type="email" placeholder="you@example.com"
+                <label className="block text-xs text-gray-400 font-medium mb-1">Email address</label>
+                <input className="w-full px-3 py-2 mb-3 bg-[#1f2937] border border-[#374151] rounded-lg text-gray-100 outline-none" type="email" placeholder="you@example.com"
                   value={email} onChange={e => setEmail(e.target.value)} required />
-                {error && <p style={{ color:'#f87171', fontSize:'13px', marginBottom:'10px' }}>{error}</p>}
-                <button type="submit" style={{ ...btnPrimary, opacity: loading || !email ? 0.5 : 1 }} disabled={loading || !email || (tab === 'signup' && !accessVerified)}>
+                {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
+                <button type="submit" className={`w-full py-3 rounded-xl text-sm font-semibold ${loading || !email ? 'bg-[#374151] text-gray-400' : 'bg-[#1D9E75] text-white'}`} disabled={loading || !email || (tab === 'signup' && !accessVerified)}>
                   {loading ? 'Sending…' : '✉ Send OTP code'}
                 </button>
               </form>
-              <p style={{ fontSize:'12px', color:'#4b5563', textAlign:'center', marginTop:'14px' }}>
+              <p className="text-xs text-gray-500 text-center mt-3">
                 A 6-digit code will be sent to your email. Expires in 15 minutes.
               </p>
             </>
@@ -240,31 +233,29 @@ export default function LoginPage() {
           {/* Step: OTP */}
           {step === 'otp' && (
             <>
-              <h1 style={{ fontSize:'20px', fontWeight:600, color:'#f9fafb', margin:'0 0 6px' }}>Check your email</h1>
-              <p style={{ fontSize:'13px', color:'#6b7280', margin:'0 0 20px' }}>
-                Code sent to <span style={{ color:'#d1d5db' }}>{email}</span>
-              </p>
-              <div style={{ display:'flex', gap:'8px', justifyContent:'center', marginBottom:'20px' }}>
+              <h1 className="text-[20px] font-semibold text-gray-100 mb-1">Check your email</h1>
+              <p className="text-sm text-gray-400 mb-5">Code sent to <span className="text-gray-300">{email}</span></p>
+              <div className="flex gap-2 justify-center mb-5">
                 {otp.map((digit, i) => (
                   <input key={i} id={`otp-${i}`}
-                    style={{ width:'46px', height:'52px', background:'#1f2937', border:'1px solid #374151', borderRadius:'10px', textAlign:'center', fontSize:'22px', fontWeight:600, color:'#f9fafb', outline:'none', boxSizing:'border-box' as 'border-box' }}
+                    className="w-12 h-12 bg-[#1f2937] border border-[#374151] rounded-lg text-center text-2xl font-semibold text-gray-100 outline-none box-border"
                     value={digit} onChange={e => handleOtpChange(e.target.value, i)}
                     onKeyDown={e => handleOtpKeyDown(e, i)} maxLength={1} inputMode="numeric" autoFocus={i===0}
                   />
                 ))}
               </div>
-              {error && <p style={{ color:'#f87171', fontSize:'13px', textAlign:'center', marginBottom:'12px' }}>{error}</p>}
+              {error && <p className="text-sm text-red-400 text-center mb-3">{error}</p>}
               <button onClick={handleVerifyOtp} disabled={otp.join('').length !== 6 || loading}
-                style={{ ...btnPrimary, opacity: otp.join('').length !== 6 || loading ? 0.5 : 1 }}>
+                className={`w-full py-3 rounded-xl text-sm font-semibold ${otp.join('').length !== 6 || loading ? 'bg-[#374151] text-gray-400' : 'bg-[#1D9E75] text-white'}`}>
                 {loading ? 'Verifying…' : '→ Verify & Sign In'}
               </button>
               <button onClick={() => { setStep('choose'); setOtp(['','','','','','']); setError('') }}
-                style={{ width:'100%', background:'none', border:'none', color:'#6b7280', fontSize:'13px', marginTop:'12px', cursor:'pointer', padding:'4px' }}>
+                className="w-full bg-transparent border-none text-gray-400 text-sm mt-3 py-1">
                 ← Use a different method
               </button>
               <button onClick={handleResendOtp}
                 disabled={loading}
-                style={{ width:'100%', background:'none', border:'none', color:'#9ca3af', fontSize:'13px', marginTop:'8px', cursor: loading ? 'not-allowed' : 'pointer', padding:'4px' }}>
+                className="w-full bg-transparent border-none text-gray-400 text-sm mt-2 py-1">
                 ↻ Resend code
               </button>
             </>
@@ -272,12 +263,12 @@ export default function LoginPage() {
 
           {/* Step: done */}
           {step === 'done' && (
-            <div style={{ textAlign:'center', padding:'20px 0' }}>
-              <div style={{ width:'56px', height:'56px', borderRadius:'50%', background:'rgba(29,158,117,0.15)', display:'flex', alignItems:'center', justifyContent:'center', margin:'0 auto 16px' }}>
+            <div className="text-center py-5">
+              <div className="w-14 h-14 rounded-full bg-[#1d9e7530] flex items-center justify-center mx-auto mb-4">
                 <svg width="28" height="28" fill="none" stroke="#1D9E75" strokeWidth={2.5} viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
               </div>
-              <h2 style={{ fontSize:'20px', fontWeight:600, color:'#f9fafb', margin:'0 0 6px' }}>You are in!</h2>
-              <p style={{ fontSize:'13px', color:'#6b7280' }}>Redirecting to dashboard…</p>
+              <h2 className="text-[20px] font-semibold text-gray-100 mb-1">You are in!</h2>
+              <p className="text-sm text-gray-400">Redirecting to dashboard…</p>
             </div>
           )}
         </div>

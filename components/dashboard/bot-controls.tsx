@@ -9,6 +9,8 @@ import {
   X, Zap, Play, Swords, Shield,
 } from 'lucide-react'
 import { BotControlsModals, type BotControlsModalsRef } from '@/components/dashboard/bot-controls-modals'
+import { useActionLocks } from '@/components/dashboard/bot-controls/useActionLocks'
+import MarketButton from '@/components/dashboard/bot-controls/MarketButton'
 import { POLL_INTERVALS } from '@/lib/polling-config'
 import { Button } from '@/components/ui/button'
 import { InlineAlert } from '@/components/ui/inline-alert'
@@ -79,26 +81,10 @@ export function BotControls() {
   const pushToast = useToastStore((s) => s.push)
   const modalsRef = useRef<BotControlsModalsRef | null>(null)
 
-  // FIX: Use ref for firing state (no re-render on toggle) + Set for per-action locks
+  // FIX: Use ref for firing state (no re-render on toggle)
   const isFiringRef = useRef(false)
-  // FIX: Use ref instead of state to avoid re-renders on lock/unlock
-  const lockedActionsRef = useRef<Set<string>>(new Set())
-  // Separate state only for triggering re-render when needed
-  const [, forceUpdate] = useState(0)
-
-  function lockAction(id: string) {
-    lockedActionsRef.current.add(id)
-    forceUpdate(n => n + 1)
-  }
-
-  function unlockAction(id: string) {
-    lockedActionsRef.current.delete(id)
-    forceUpdate(n => n + 1)
-  }
-
-  function isLocked(id: string) {
-    return lockedActionsRef.current.has(id)
-  }
+  // Action lock helpers (extracted)
+  const { lockAction, unlockAction, isLocked } = useActionLocks()
 
   const { data, dataUpdatedAt } = useBotStatusQuery()
 
@@ -382,9 +368,8 @@ export function BotControls() {
             const disabled = isStopping || !hasStrategies || stopAllMutation.isPending || isThisMarketMutating
 
             return (
-              <button
+              <MarketButton
                 key={market.id}
-                type="button"
                 disabled={disabled}
                 onClick={() => handleMarketClick(market.id)}
                 className={cn(
@@ -452,7 +437,7 @@ export function BotControls() {
                     isActive && 'animate-pulse'
                   )} />
                 </div>
-              </button>
+              </MarketButton>
             )
           })}
         </div>

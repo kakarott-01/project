@@ -24,6 +24,7 @@ import { isBotLocked } from "@/lib/bot-lock";
 import { useBotStatusQuery } from '@/lib/use-bot-status-query';
 import { POLL_INTERVALS } from "@/lib/polling-config";
 import { apiFetch } from '@/lib/api-client';
+import { useStrategySettings } from '@/components/dashboard/strategy-settings/useStrategySettings'
 
 const MARKETS = [
   { id: "crypto", label: "Crypto", publicLabel: "CRYPTO" },
@@ -256,24 +257,7 @@ export function StrategySettings() {
   // ── NEW: track which market configs have unsaved user edits
   const [dirtyMarkets, setDirtyMarkets] = useState<Set<string>>(new Set());
 
-  const { data: strategyData, isLoading: strategiesLoading } = useQuery<StrategyCatalogResponse>({
-    queryKey: QUERY_KEYS.STRATEGY_CATALOG,
-    queryFn: () => apiFetch<StrategyCatalogResponse>('/api/strategies'),
-  });
-
-  const { data: configData, isLoading: configsLoading } = useQuery<StrategyConfigDataResponse>({
-    queryKey: QUERY_KEYS.STRATEGY_CONFIGS,
-    queryFn: () => apiFetch<StrategyConfigDataResponse>('/api/strategy-config'),
-    select: (data) => data,
-    staleTime: POLL_INTERVALS.STRATEGY, // Match bot-controls.tsx — consistent cache behavior across subscribers
-  });
-
-  const { data: riskData } = useQuery<RiskSettingsResponse>({
-    queryKey: QUERY_KEYS.RISK_SETTINGS,
-    queryFn: () => apiFetch<RiskSettingsResponse>('/api/risk-settings'),
-  });
-
-  const { data: botData } = useBotStatusQuery();
+  const { strategyData, strategiesLoading, configData, configsLoading, riskData, botData } = useStrategySettings()
 
   useEffect(() => {
     if (!configData?.markets) return

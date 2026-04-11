@@ -2,7 +2,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
-import { backtestRuns, trades } from '@/lib/schema'
+import { backtestRuns, trades, riskSettings } from '@/lib/schema'
 import { eq, and, sql, gte } from 'drizzle-orm'
 import { guardErrorResponse, requireAccess } from '@/lib/guards'
 
@@ -65,6 +65,26 @@ export async function GET(req: NextRequest) {
     ))
     .groupBy(sql`date(closed_at)`)
     .orderBy(sql`date(closed_at) asc`)
+
+  // ── Principle / current balance / totals (for Daily Balance card)
+  const settings = await db.query.riskSettings.findFirst({
+    where: eq(riskSettings.userId, session.id),
+    columns: { paperBalance: true },
+  })
+
+  const closedConditions = [...conditions, eq(trades.status, 'closed' as any)]
+  const totals = await db
+    .select({
+      totalPnl:  sql<number>`coalesce(sum(coalesce(net_pnl, pnl)), 0)::float`,
+      totalFees: sql<number>`coalesce(sum(coalesce(fee_amount, 0)), 0)::float`,
+      totalTrades: sql<number>`count(*)::int`,
+    })
+    .from(trades)
+    .where(and(...closedConditions))
+
+  const principle = Number(settings?.paperBalance ?? 10_000)
+  const currentBalance = principle + (totals[0]?.totalPnl ?? 0)
+  const totalFees = totals[0]?.totalFees ?? 0
 
   // ── Performance by market ─────────────────────────────────────────────────
   const byMarket = await db
@@ -170,6 +190,10 @@ export async function GET(req: NextRequest) {
       liveCount:   summary.liveCount,
     },
     dailyPnl,
+    principle: Math.round(principle * 100) / 100,
+    currentBalance: Math.round(currentBalance * 100) / 100,
+    totalFees: Math.round(totalFees * 100) / 100,
+    totalTrades: totals[0]?.totalTrades ?? 0,
     byMarket,
     byStrategy: byStrategy.map((row) => ({
       ...row,

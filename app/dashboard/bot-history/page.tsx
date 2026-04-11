@@ -1,5 +1,5 @@
- 'use client'
-import { useState, useCallback } from 'react'
+'use client'
+import { useState, useCallback, useEffect } from 'react'
 import { apiFetch } from '@/lib/api-client'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { QUERY_KEYS } from '@/lib/query-keys'
@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 import { format} from 'date-fns'
 import dynamic from 'next/dynamic'
+import { useToastStore } from '@/lib/toast-store'
 import { formatElapsedDuration, getSessionDurationMs } from '@/lib/time'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -129,15 +130,7 @@ function exportCSV(sessions: BotSession[], now: number) {
   a.click(); URL.revokeObjectURL(url)
 }
 
-// ─── Toast ────────────────────────────────────────────────────────────────────
-function useToast() {
-  const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null)
-  const show = useCallback((msg: string, type: 'success' | 'error' = 'success') => {
-    setToast({ msg, type })
-    setTimeout(() => setToast(null), 3000)
-  }, [])
-  return { toast, show }
-}
+// Use global toast store
 
 // ─── Stat Card (fixed layout) ─────────────────────────────────────────────────
 function StatCard({
@@ -224,8 +217,16 @@ function BotSessionRow({
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function BotHistoryPage() {
   const qc = useQueryClient()
-  const { toast, show: showToast } = useToast()
-  const now = Date.now()
+  const toasts = useToastStore(s => s.toasts)
+  const pushToast = useToastStore(s => s.push)
+  const latestToast = toasts.length ? toasts[toasts.length - 1] : null
+  const showToast = (msg: string, type: 'success' | 'error' = 'success') => pushToast({ title: msg, tone: type })
+  const [now, setNow] = useState(Date.now())
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 10000)
+    return () => clearInterval(id)
+  }, [])
 
   const [page,        setPage]        = useState(1)
   const [modeFilter,  setModeFilter]  = useState<'all' | 'paper' | 'live'>('all')
@@ -285,13 +286,13 @@ export default function BotHistoryPage() {
     <div className="space-y-5 max-w-7xl mx-auto">
 
       {/* Toast */}
-      {toast && (
+      {latestToast && (
         <div className={`fixed top-4 right-4 z-50 flex items-center gap-2 px-4 py-3 rounded-xl shadow-2xl text-sm font-medium border transition-all ${
-          toast.type === 'success'
+          latestToast.tone === 'success'
             ? 'bg-brand-500/15 border-brand-500/30 text-brand-500'
             : 'bg-red-900/20 border-red-800/30 text-red-400'
         }`}>
-          {toast.type === 'success' ? '✓' : '✗'} {toast.msg}
+          {latestToast.tone === 'success' ? '✓' : '✗'} {latestToast.title}
         </div>
       )}
 

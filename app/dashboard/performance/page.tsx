@@ -125,15 +125,9 @@ export default function PerformancePage() {
   if (mode !== 'all') params.set('mode', mode)
   if (market !== 'all') params.set('market', market)
 
-  const { data, isLoading } = useQuery<PerformanceResponse>({
+  const { data, isLoading } = useQuery<PerformanceResponse & { principle?: number; currentBalance?: number; totalFees?: number; totalTrades?: number }>( {
     queryKey: QUERY_KEYS.PERFORMANCE({ mode, market }),
     queryFn: () => apiFetch<PerformanceResponse>(`/api/performance?${params}`),
-    staleTime: 30_000,
-  })
-
-  const { data: dailyData, isLoading: dailyLoading } = useQuery<DailyData>({
-    queryKey: QUERY_KEYS.DAILY_PNL({ mode, market }),
-    queryFn: () => apiFetch(`/api/daily-pnl?${params}`),
     staleTime: 30_000,
   })
 
@@ -142,14 +136,18 @@ export default function PerformancePage() {
   const byMarket = data?.byMarket ?? []
   const cumPnl = data?.cumPnl ?? []
 
-  const principle = dailyData?.principle ?? 0
-  const currentBalance = dailyData?.currentBalance ?? 0
+  const principle = (data as any)?.principle ?? 0
+  const currentBalance = (data as any)?.currentBalance ?? 0
   const balanceChangePct = principle > 0 ? ((currentBalance - principle) / principle) * 100 : 0
-  const dailyRows = dailyData?.daily ?? []
-  const totalFees = dailyData?.totalFees ?? 0
-  const totalTrades = dailyData?.totalTrades ?? 0
-  const totalPnl = dailyData?.totalPnl ?? 0
+  const dailyRows = data?.dailyPnl ?? []
+  const totalFees = (data as any)?.totalFees ?? 0
+  const totalTrades = (data as any)?.totalTrades ?? 0
+  const totalPnl = data?.summary?.totalPnl ?? 0
   const isPositive = (cumPnl[cumPnl.length - 1]?.pnl ?? 0) >= 0
+
+  // derive today's numbers from the daily series returned by the API
+  const todayIso = new Date().toISOString().slice(0, 10)
+  const todayPnl = dailyRows.find(r => r.date === todayIso)?.pnl ?? 0
 
   const metrics = s ? [
     {
@@ -287,16 +285,16 @@ export default function PerformancePage() {
           <BalanceCard
             label="Principle Capital"
             value={formatINR(principle)}
-            sub={dailyLoading ? 'Loading balance baseline...' : 'Starting capital for the current filter'}
+            sub={isLoading ? 'Loading balance baseline...' : 'Starting capital for the current filter'}
             color="text-gray-200"
             icon={Banknote}
           />
           <BalanceCard
             label="Current Balance"
             value={formatINR(currentBalance)}
-            sub={dailyLoading
+            sub={isLoading
               ? 'Loading current balance...'
-              : `${balanceChangePct >= 0 ? '+' : ''}${balanceChangePct.toFixed(2)}% from principle · ${formatPnl(dailyData?.todayPnl ?? 0)} today`}
+              : `${balanceChangePct >= 0 ? '+' : ''}${balanceChangePct.toFixed(2)}% from principle · ${formatPnl(todayPnl)} today`}
             color={currentBalance >= principle ? 'text-emerald-400' : 'text-red-400'}
             icon={Wallet}
           />
@@ -321,7 +319,7 @@ export default function PerformancePage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800/50">
-                {dailyLoading ? (
+                {isLoading ? (
                   Array.from({ length: 7 }).map((_, index) => <SkeletonRow key={index} />)
                 ) : dailyRows.length === 0 ? (
                   <tr>
@@ -359,7 +357,7 @@ export default function PerformancePage() {
             </table>
           </div>
 
-          {dailyRows.length > 0 && !dailyLoading && (
+          {dailyRows.length > 0 && !isLoading && (
             <div className="flex items-center justify-between px-5 py-3 border-t border-gray-800 bg-gray-900/40">
               <span className="text-xs text-gray-500">{dailyRows.length} trading days shown</span>
               <div className="flex items-center gap-6 text-xs">

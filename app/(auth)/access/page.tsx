@@ -50,60 +50,43 @@ export default function AccessPage() {
     }
   }
 
-  const S = {
-    page:   { minHeight:'100vh', background:'#030712', display:'flex', alignItems:'center', justifyContent:'center', padding:'1rem', fontFamily:'system-ui,-apple-system,sans-serif' } as React.CSSProperties,
-    wrap:   { width:'100%', maxWidth:'420px' } as React.CSSProperties,
-    logo:   { display:'flex', alignItems:'center', justifyContent:'center', gap:'10px', marginBottom:'2rem' } as React.CSSProperties,
-    icon:   { width:'36px', height:'36px', borderRadius:'10px', background:'#1D9E75', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 as 0 } as React.CSSProperties,
-    name:   { fontSize:'20px', fontWeight:600, color:'#f9fafb' } as React.CSSProperties,
-    card:   { background:'#111827', border:'1px solid #1f2937', borderRadius:'16px', padding:'24px' } as React.CSSProperties,
-    badge:  { display:'flex', alignItems:'center', gap:'6px', marginBottom:'6px' } as React.CSSProperties,
-    h1:     { fontSize:'20px', fontWeight:600, color:'#f9fafb', margin:'0 0 6px' } as React.CSSProperties,
-    sub:    { fontSize:'13px', color:'#6b7280', margin:'0 0 20px' } as React.CSSProperties,
-    bar:    { height:'3px', background:'#1f2937', borderRadius:'99px', marginBottom:'20px', overflow:'hidden' } as React.CSSProperties,
-    row:    { display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'8px' } as React.CSSProperties,
-    label:  { fontSize:'12px', color:'#9ca3af', fontWeight:500 } as React.CSSProperties,
-    dots:   { display:'flex', alignItems:'center', gap:'6px' } as React.CSSProperties,
-    input:  { width:'100%', padding:'12px', marginBottom:'12px', background:'#1f2937', border:'1px solid #374151', borderRadius:'10px', color:'#f9fafb', fontSize:'18px', fontFamily:'monospace', textAlign:'center' as 'center', letterSpacing:'4px', outline:'none', boxSizing:'border-box' as 'border-box' } as React.CSSProperties,
-    err:    { display:'flex', alignItems:'center', gap:'8px', background:'rgba(239,68,68,0.1)', border:'1px solid rgba(239,68,68,0.3)', borderRadius:'8px', padding:'10px 12px', marginBottom:'12px', color:'#f87171', fontSize:'13px' } as React.CSSProperties,
-    divider:{ marginTop:'20px', paddingTop:'16px', borderTop:'1px solid #1f2937' } as React.CSSProperties,
-  }
+  // Replaced inline style object with Tailwind classes for consistency
 
   return (
-    <div style={S.page}>
-      <div style={S.wrap}>
-        <div style={S.logo}>
-          <div style={S.icon}>
+    <div className="min-h-screen bg-[#030712] flex items-center justify-center p-4 font-sans">
+      <div className="w-full max-w-[420px]">
+        <div className="flex items-center justify-center gap-2.5 mb-8">
+          <div className="w-9 h-9 rounded-lg bg-[#1D9E75] flex items-center justify-center flex-shrink-0">
             <svg width="18" height="18" fill="none" stroke="white" strokeWidth={2.5} viewBox="0 0 24 24">
               <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/>
               <polyline points="16 7 22 7 22 13"/>
             </svg>
           </div>
-          <span style={S.name}>UpBot</span>
+          <span className="text-[20px] font-semibold text-gray-100">UpBot</span>
         </div>
 
-        <div style={S.card}>
-          <div style={S.badge}>
+        <div className="bg-[#111827] border border-[#1f2937] rounded-xl p-6">
+          <div className="flex items-center gap-1.5 mb-1">
             <svg width="13" height="13" fill="none" stroke="#f59e0b" strokeWidth={2} viewBox="0 0 24 24">
               <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
             </svg>
-            <span style={{ fontSize:'11px', color:'#f59e0b', fontWeight:600, textTransform:'uppercase', letterSpacing:'0.06em' }}>Private Access</span>
+            <span className="text-[11px] text-[#f59e0b] font-semibold uppercase" style={{ letterSpacing: '0.06em' }}>Private Access</span>
           </div>
 
-          <h1 style={S.h1}>Enter access code</h1>
-          <p style={S.sub}>Single-use code required. Expires in {mins}:{secs}</p>
+          <h1 className="text-[20px] font-semibold text-gray-100 mb-1">Enter access code</h1>
+          <p className="text-sm text-gray-400 mb-5">Single-use code required. Expires in {mins}:{secs}</p>
 
-          <div style={S.bar}>
-            <div style={{ height:'100%', borderRadius:'99px', transition:'width 1s linear', width:`${timerPct}%`, background: timeLeft < 120 ? '#ef4444' : '#1D9E75' }} />
+          <div className="h-3 bg-[#1f2937] rounded-full mb-5 overflow-hidden">
+            <div style={{ width: `${timerPct}%`, background: timeLeft < 120 ? '#ef4444' : '#1D9E75' }} className="h-full rounded-full transition-all" />
           </div>
 
           <form onSubmit={handleSubmit}>
-            <div style={S.row}>
-              <span style={S.label}>Access Code</span>
-              <div style={S.dots}>
-                <span style={{ fontSize:'11px', color:'#4b5563' }}>Attempts:</span>
+            <div className="flex justify-between items-center mb-2">
+              <span className="text-xs text-gray-400 font-medium">Access Code</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] text-gray-500">Attempts:</span>
                 {[0,1,2].map(i => (
-                  <div key={i} style={{ width:'8px', height:'8px', borderRadius:'50%', background: i < remaining ? '#ef4444' : '#374151' }} />
+                  <div key={i} className="w-2 h-2 rounded-full" style={{ background: i < remaining ? '#ef4444' : '#374151' }} />
                 ))}
               </div>
             </div>
@@ -116,11 +99,11 @@ export default function AccessPage() {
               maxLength={14}
               disabled={locked || loading}
               autoComplete="off"
-              style={S.input}
+              className="w-full px-4 py-3 mb-3 bg-[#1f2937] border border-[#374151] rounded-lg text-gray-100 text-lg font-mono text-center tracking-widest outline-none"
             />
 
             {error && (
-              <div style={S.err}>
+              <div className="flex items-center gap-2 bg-red-100 border border-red-300 rounded-md p-3 mb-3 text-red-500 text-sm">
                 <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" style={{ flexShrink:0 }}>
                   <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
                   <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
@@ -132,32 +115,25 @@ export default function AccessPage() {
             <button
               type="submit"
               disabled={loading || locked || !code.trim()}
-              style={{
-                width:'100%', padding:'12px',
-                background: loading || locked || !code.trim() ? '#374151' : '#1D9E75',
-                border:'none', borderRadius:'10px', color:'white',
-                fontSize:'14px', fontWeight:600,
-                cursor: loading || locked || !code.trim() ? 'not-allowed' : 'pointer',
-                display:'flex', alignItems:'center', justifyContent:'center', gap:'8px',
-              }}
+              className={`w-full py-3 rounded-lg text-white font-semibold flex items-center justify-center gap-2 ${loading || locked || !code.trim() ? 'bg-[#374151]' : 'bg-[#1D9E75]'}`}
             >
               {loading ? 'Verifying…' : locked ? '🔒 Access Locked' : 'Verify Code'}
             </button>
           </form>
 
-          <div style={{ marginTop:'16px', fontSize:'13px', color:'#6b7280', textAlign:'center' }}>
-            Already have an account? <a href="/login" style={{ color:'#1D9E75', textDecoration:'underline' }}>Sign in</a>
+          <div className="mt-4 text-sm text-gray-400 text-center">
+            Already have an account? <a href="/login" className="text-[#1D9E75] underline">Sign in</a>
           </div>
 
-          <div style={S.divider}>
+          <div className="mt-5 pt-4 border-t border-[#1f2937]">
             {[
               { dot:'#1D9E75', text:'Single-use — code is burned on entry' },
               { dot:'#1D9E75', text:'Expires 15 minutes after generation' },
               { dot:'#ef4444', text:'3 wrong attempts locks your IP for 30 minutes' },
             ].map((item, i) => (
-              <div key={i} style={{ display:'flex', alignItems:'flex-start', gap:'10px', marginBottom:'8px' }}>
-                <div style={{ width:'6px', height:'6px', borderRadius:'50%', background:item.dot, marginTop:'5px', flexShrink:0 }} />
-                <span style={{ fontSize:'12px', color:'#6b7280' }}>{item.text}</span>
+              <div key={i} className="flex items-start gap-2.5 mb-2">
+                <div className="w-1.5 h-1.5 rounded-full mt-1" style={{ background: item.dot }} />
+                <span className="text-sm text-gray-400">{item.text}</span>
               </div>
             ))}
           </div>
