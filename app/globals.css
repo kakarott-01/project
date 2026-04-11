@@ -209,3 +209,9 @@ textarea {
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: #111827; }
 ::-webkit-scrollbar-thumb { background: #374151; border-radius: 99px; }
+
+/* Focus outline used across the app (moved from inline styles) */
+input:focus, textarea:focus {
+  border-color: #1D9E75 !important;
+  box-shadow: 0 0 0 3px rgba(29,158,117,0.15);
+}

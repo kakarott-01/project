@@ -42,6 +42,11 @@ export const authOptions: NextAuthOptions = {
     strategy: "jwt",
   },
 
+  // Use our custom client-side login page instead of NextAuth's default HTML page
+  pages: {
+    signIn: '/login',
+  },
+
   callbacks: {
     async signIn() {
       return true

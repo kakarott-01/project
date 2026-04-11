@@ -1,6 +1,7 @@
 'use client'
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { signIn } from 'next-auth/react'
 import { apiFetch } from '@/lib/api-client'
 
 type Step = 'choose' | 'otp' | 'done'
@@ -43,7 +44,12 @@ export default function LoginPage() {
 
   async function handleGoogleLogin() {
     setLoading(true)
-    window.location.href = '/api/auth/signin/google?callbackUrl=/dashboard'
+    try {
+      await signIn('google', { callbackUrl: '/dashboard' })
+    } catch (err) {
+      // fallback to direct URL if signIn fails for any reason
+      window.location.href = '/api/auth/signin/google?callbackUrl=/dashboard'
+    }
   }
 
   async function handleSendOtp(e: React.FormEvent) {
@@ -273,7 +279,6 @@ export default function LoginPage() {
           )}
         </div>
       </div>
-      <style>{`input:focus { border-color: #1D9E75 !important; box-shadow: 0 0 0 3px rgba(29,158,117,0.15); }`}</style>
     </div>
   )
 }
