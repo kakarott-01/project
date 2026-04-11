@@ -4,7 +4,7 @@ import { format } from 'date-fns'
 import { ArrowUpRight, ArrowDownRight } from 'lucide-react'
 
 // FIX: Proper typed interface instead of any[]
-interface Trade {
+export interface Trade {
   id: string
   symbol: string
   side: 'buy' | 'sell'

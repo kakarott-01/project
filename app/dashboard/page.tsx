@@ -5,7 +5,7 @@ import {
   BarChart3, Layers, ArrowUpRight,
 } from 'lucide-react'
 import { PnlChart } from '@/components/charts/pnl-chart'
-import { TradeTable } from '@/components/dashboard/trade-table'
+import { Trade, TradeTable} from '@/components/dashboard/trade-table'
 import { BotControls } from '@/components/dashboard/bot-controls'
 import { useBotStatusQuery } from '@/lib/use-bot-status-query'
 import { formatCurrency } from '@/lib/utils'
@@ -272,7 +272,7 @@ export default function DashboardPage() {
             <ArrowUpRight className="w-3.5 h-3.5" />
           </a>
         </div>
-        <TradeTable trades={recentTrades} compact />
+        <TradeTable trades={recentTrades as Trade[]} compact />
       </div>
 
     </div>
