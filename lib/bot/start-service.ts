@@ -4,6 +4,7 @@ import { botSessions, botStatuses, exchangeApis, marketConfigs, trades } from '@
 import { getUserMarketStrategyConfig } from '@/lib/strategies/config-service'
 import type { MarketType } from '@/lib/strategies/types'
 import { toUtcIsoString } from '@/lib/time'
+import { postToBotEngine } from '@/lib/bot-engine-client'
 
 export async function startBotForUser(
   userId: string,
@@ -172,43 +173,23 @@ export async function startBotForUser(
     }
   }
 
-  let botRes: Response | null = null
   try {
-    botRes = await fetch(`${process.env.BOT_ENGINE_URL}${isRunning ? '/bot/sync' : '/bot/start'}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Bot-Secret': process.env.BOT_ENGINE_SECRET!,
-      },
-      body: JSON.stringify({
-        user_id: userId,
-        markets,
-        session_ids: sessionIds,
-        started_at: toUtcIsoString(botStartedAt),
-      }),
-      signal: AbortSignal.timeout(15_000),
-    })
-  } catch {
+    await postToBotEngine(isRunning ? '/bot/sync' : '/bot/start', {
+      user_id: userId,
+      markets,
+      session_ids: sessionIds,
+      started_at: toUtcIsoString(botStartedAt),
+    }, 15_000)
+  } catch (err) {
     if (isRunning) {
       await rollbackBotSync({ userId, createdSessionIds, stoppedSessionIds, marketsToRestore: currentMarkets })
     } else {
       await rollbackBotStart(userId, createdSessionIds)
     }
-    const error = new Error('Bot engine is unreachable. Is the Render service running?')
-    ;(error as Error & { status?: number }).status = 503
-    throw error
-  }
-
-  if (!botRes.ok) {
-    const engineBody = await botRes.json().catch(() => ({}))
-    if (isRunning) {
-      await rollbackBotSync({ userId, createdSessionIds, stoppedSessionIds, marketsToRestore: currentMarkets })
-    } else {
-      await rollbackBotStart(userId, createdSessionIds)
-    }
-    const error = new Error(engineBody.detail ?? 'Bot engine returned an error')
-    ;(error as Error & { status?: number; detail?: unknown }).status = botRes.status
-    ;(error as Error & { detail?: unknown }).detail = engineBody
+    const e = err instanceof Error ? err : new Error('Bot engine error')
+    const error = new Error(e.message ?? 'Bot engine is unreachable. Is the Render service running?') as any
+    error.status = (err as any)?.status ?? 503
+    if ((err as any)?.data) error.detail = (err as any).data
     throw error
   }
 

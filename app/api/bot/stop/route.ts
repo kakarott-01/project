@@ -22,6 +22,7 @@ import { acquireBotLock } from '@/lib/bot-lock'
 import { _doImmediateStop } from '@/lib/bot-stop'
 import { getBotStatusSnapshot } from '@/lib/bot/status-snapshot'
 import { guardErrorResponse, requireAccess } from '@/lib/guards'
+import { postToBotEngine } from '@/lib/bot-engine-client'
 
 type StopMode = 'close_all' | 'graceful'
 
@@ -180,14 +181,5 @@ async function _notifyBotEngine(userId: string, action: 'stop' | 'drain' | 'clos
   const endpoint = action === 'stop'      ? '/bot/stop'
                  : action === 'drain'     ? '/bot/drain'
                  : '/bot/close-all'
-
-  await fetch(`${process.env.BOT_ENGINE_URL}${endpoint}`, {
-    method:  'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Bot-Secret': process.env.BOT_ENGINE_SECRET!,
-    },
-    body:   JSON.stringify({ user_id: userId }),
-    signal: AbortSignal.timeout(8_000),
-  })
+  await postToBotEngine(endpoint, { user_id: userId }, 8_000)
 }

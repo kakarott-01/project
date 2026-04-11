@@ -14,6 +14,7 @@
 import { db } from '@/lib/db'
 import { botStatuses, botSessions, trades } from '@/lib/schema'
 import { eq, and, sql } from 'drizzle-orm'
+import { postToBotEngine } from '@/lib/bot-engine-client'
 
 export async function _doImmediateStop(userId: string, now: Date) {
   // ── F6: Atomic claim — only one concurrent call succeeds ──────────────────
@@ -40,15 +41,7 @@ export async function _doImmediateStop(userId: string, now: Date) {
   }
 
   // ── We claimed the stop — notify engine (best-effort) ────────────────────
-  fetch(`${process.env.BOT_ENGINE_URL}/bot/stop`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Bot-Secret': process.env.BOT_ENGINE_SECRET!,
-    },
-    body: JSON.stringify({ user_id: userId }),
-    signal: AbortSignal.timeout(8_000),
-  }).catch(() => null)
+  postToBotEngine('/bot/stop', { user_id: userId }, 8_000).catch(() => null)
 
   // ── Find all sessions that are still running ──────────────────────────────
   let runningSessions: Awaited<ReturnType<typeof db.query.botSessions.findMany>>

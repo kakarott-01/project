@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { InlineAlert } from '@/components/ui/inline-alert'
 import { InfoTip } from '@/components/ui/tooltip'
 import { useToastStore } from '@/lib/toast-store'
+import { apiFetch } from '@/lib/api-client'
 
 const defaults = {
   maxPositionPct: 2,
@@ -39,6 +40,20 @@ const presets = {
     values: { maxPositionPct: 4, stopLossPct: 2, takeProfitPct: 4.5, maxDailyLossPct: 8, maxOpenTrades: 5, cooldownSeconds: 120 },
   },
 } as const
+
+type RiskSettingsResponse = {
+  maxPositionPct?: number
+  stopLossPct?: number
+  takeProfitPct?: number
+  maxDailyLossPct?: number
+  maxOpenTrades?: number
+  maxTotalExposure?: number
+  maxDailyLoss?: number
+  maxOpenPositions?: number
+  cooldownSeconds?: number
+  trailingStop?: boolean
+  paperBalance?: number
+}
 
 function formatCooldown(seconds: number) {
   if (seconds >= 3600) return `${Math.round(seconds / 3600)}h`
@@ -104,9 +119,9 @@ export default function SettingsPage() {
   const [form, setForm] = useState(defaults)
   const { isRunning } = useTradingGuard()
 
-  const { data } = useQuery({
+  const { data } = useQuery<RiskSettingsResponse | null>({
     queryKey: ['risk-settings'],
-    queryFn: () => fetch('/api/risk-settings').then((response) => response.json()),
+    queryFn: () => apiFetch<RiskSettingsResponse>('/api/risk-settings'),
   })
 
   useEffect(() => {
@@ -129,14 +144,7 @@ export default function SettingsPage() {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const response = await fetch('/api/risk-settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
-      })
-      const payload = await response.json()
-      if (!response.ok) throw new Error(payload.error ?? 'Failed to save risk settings')
-      return payload
+      return apiFetch('/api/risk-settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(form) })
     },
     onMutate: async () => {
       await qc.cancelQueries({ queryKey: BOT_STATUS_QUERY_KEY })

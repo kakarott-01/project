@@ -7,6 +7,7 @@ import { useEffect } from 'react'
 import { MobileSidebar } from '@/components/dashboard/sidebar'
 import { useBotStatusQuery } from '@/lib/use-bot-status-query'
 import { formatElapsedDuration, getSessionDurationMs } from '@/lib/time'
+import { apiFetch } from '@/lib/api-client'
 
 interface TopBarProps {
   user?: {
@@ -70,7 +71,7 @@ export function TopBar({ user }: TopBarProps) {
     if (isSigningOut) return
     setIsSigningOut(true)
     try {
-      await fetch('/api/logout', { method: 'POST' })
+      await apiFetch('/api/logout', { method: 'POST' })
     } catch {
       // Best effort
     } finally {

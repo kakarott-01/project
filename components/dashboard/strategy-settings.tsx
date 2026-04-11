@@ -13,13 +13,15 @@ import {
   Layers3,
   Loader2,
 } from "lucide-react";
+import dynamic from 'next/dynamic'
 import { Button } from "@/components/ui/button";
 import { InlineAlert } from "@/components/ui/inline-alert";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { InfoTip } from "@/components/ui/tooltip";
 import { useToastStore } from "@/lib/toast-store";
 import { isBotLocked } from "@/lib/bot-lock";
-import { useBotStatusQuery } from "@/lib/use-bot-status-query";
+import { useBotStatusQuery } from '@/lib/use-bot-status-query';
+import { apiFetch } from '@/lib/api-client';
 
 const MARKETS = [
   { id: "crypto", label: "Crypto", publicLabel: "CRYPTO" },
@@ -69,6 +71,33 @@ type RuntimeConfig = {
     warning?: string;
   } | null;
 };
+
+type StrategyCatalogResponse = {
+  strategies?: StrategyItem[]
+}
+
+type StrategyConfigMarket = {
+  marketType: MarketId
+  executionMode: 'SAFE' | 'AGGRESSIVE'
+  positionMode?: 'NET' | 'HEDGE'
+  allowHedgeOpposition?: boolean
+  conflictBlocking?: boolean
+  maxPositionsPerSymbol?: number
+  maxCapitalPerStrategyPct?: number
+  maxDrawdownPct?: number
+  strategyKeys: string[]
+  strategySettings?: Record<string, any>
+  conflictWarnings?: Array<{ code: string; severity: 'info' | 'warning' | 'blocking'; message: string }>
+  exchangeCapabilities?: any
+}
+
+type StrategyConfigDataResponse = {
+  markets?: StrategyConfigMarket[]
+}
+
+type RiskSettingsResponse = {
+  paperBalance?: number
+}
 
 type StrategyItem = {
   strategyKey: string;
@@ -123,63 +152,9 @@ function marketCategory(market: MarketId) {
   return MARKETS.find((item) => item.id === market)?.publicLabel ?? "CRYPTO";
 }
 
-function AggressiveModeModal({
-  market,
-  onCancel,
-  onConfirm,
-}: {
-  market: string;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: "rgba(3,7,18,0.88)", backdropFilter: "blur(4px)" }}
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onCancel();
-      }}
-    >
-      <div className="w-full max-w-lg rounded-3xl border border-red-500/20 bg-gray-950 shadow-2xl">
-        <div className="border-b border-red-500/15 px-5 py-4">
-          <p className="text-sm font-semibold text-red-200">
-            AGGRESSIVE MODE ENABLED
-          </p>
-          <p className="mt-1 text-xs text-gray-400">
-            {market} will trade with independent strategy capital.
-          </p>
-        </div>
-        <div className="space-y-4 px-5 py-5">
-          <InlineAlert tone="danger" title="Review before saving">
-            Strategies trade independently, capital is split per strategy, and
-            risk rises significantly when hedge behavior or conflicting signals
-            are allowed.
-          </InlineAlert>
-          <div className="space-y-2 rounded-2xl border border-gray-800 bg-gray-900/60 p-3">
-            <p className="text-xs text-gray-300">
-              Per-strategy limits apply only in AGGRESSIVE mode.
-            </p>
-            <p className="text-xs text-gray-300">
-              Global risk controls still enforce the final hard cap.
-            </p>
-            <p className="text-xs text-gray-300">
-              Priority-based blocking can prevent lower-priority entries when
-              capital is tight.
-            </p>
-          </div>
-          <div className="flex gap-3">
-            <Button variant="secondary" className="flex-1" onClick={onCancel}>
-              Cancel
-            </Button>
-            <Button className="flex-1" onClick={onConfirm}>
-              I understand the risk
-            </Button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+// AggressiveModeModal moved to components/modals/aggressive-mode-modal.tsx and will be lazy-loaded where used.
+
+const AggressiveModeModal = dynamic(() => import('@/components/modals/aggressive-mode-modal'), { ssr: false })
 
 function NumberField({
   label,
@@ -277,22 +252,20 @@ export function StrategySettings() {
     new Set(),
   );
 
-  const { data: strategyData, isLoading: strategiesLoading } = useQuery({
+  const { data: strategyData, isLoading: strategiesLoading } = useQuery<StrategyCatalogResponse>({
     queryKey: ["strategy-catalog"],
-    queryFn: () => fetch("/api/strategies").then((response) => response.json()),
+    queryFn: () => apiFetch<StrategyCatalogResponse>('/api/strategies'),
   });
 
-  const { data: configData, isLoading: configsLoading } = useQuery({
+  const { data: configData, isLoading: configsLoading } = useQuery<StrategyConfigDataResponse>({
     queryKey: ["strategy-configs"],
-    queryFn: () =>
-      fetch("/api/strategy-config").then((response) => response.json()),
+    queryFn: () => apiFetch<StrategyConfigDataResponse>('/api/strategy-config'),
     staleTime: 30_000, // Match bot-controls.tsx — consistent cache behavior across subscribers
   });
 
-  const { data: riskData } = useQuery({
+  const { data: riskData } = useQuery<RiskSettingsResponse>({
     queryKey: ["risk-settings"],
-    queryFn: () =>
-      fetch("/api/risk-settings").then((response) => response.json()),
+    queryFn: () => apiFetch<RiskSettingsResponse>('/api/risk-settings'),
   });
 
   const { data: botData } = useBotStatusQuery();
@@ -320,18 +293,10 @@ export function StrategySettings() {
   }, [configData]);
 
   const saveMutation = useMutation({
-    mutationFn: async ({
-      marketType,
-      config,
-      aggressiveConfirmed,
-    }: {
-      marketType: MarketId;
-      config: RuntimeConfig;
-      aggressiveConfirmed: boolean;
-    }) => {
-      const response = await fetch("/api/strategy-config", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
+    mutationFn: async ({ marketType, config, aggressiveConfirmed }: { marketType: MarketId; config: RuntimeConfig; aggressiveConfirmed: boolean }) => {
+      return apiFetch('/api/strategy-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           marketType,
           executionMode: config.executionMode,
@@ -345,11 +310,7 @@ export function StrategySettings() {
           strategyKeys: config.strategyKeys,
           strategySettings: toStrategyPayload(config.strategySettings),
         }),
-      });
-      const data = await response.json();
-      if (!response.ok)
-        throw new Error(data.error ?? "Failed to save strategy config");
-      return data;
+      })
     },
     onMutate: async ({ marketType }) => {
       setSavingMarket(marketType);

@@ -1,5 +1,8 @@
-'use client'
+ 'use client'
 import { useState, useCallback } from 'react'
+import useTrades from '@/lib/hooks/use-trades'
+import { apiFetch } from '@/lib/api-client'
+import { ConfirmModal } from '@/components/modals/confirm-modal'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { BOT_STATUS_QUERY_KEY, isValidBotSnapshot } from '@/lib/bot-status-client'
 import {
@@ -51,31 +54,7 @@ function useToast() {
   return { toast, show }
 }
 
-// ─── Confirm modal ────────────────────────────────────────────────────────────
-function ConfirmModal({ title, message, onConfirm, onClose }: {
-  title: string; message: string; onConfirm: () => void; onClose: () => void
-}) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(3,7,18,0.85)', backdropFilter: 'blur(4px)' }}
-      onClick={e => { if (e.target === e.currentTarget) onClose() }}>
-      <div className="w-full max-w-sm bg-gray-900 border border-red-900/40 rounded-2xl shadow-2xl overflow-hidden">
-        <div className="flex items-center gap-3 px-5 py-4 border-b border-red-900/30 bg-red-950/20">
-          <AlertTriangle className="w-4 h-4 text-red-400" />
-          <p className="text-sm font-semibold text-red-300">{title}</p>
-          <button onClick={onClose} className="ml-auto text-gray-600 hover:text-gray-300"><X className="w-4 h-4" /></button>
-        </div>
-        <div className="px-5 py-5 space-y-4">
-          <p className="text-sm text-gray-300 leading-relaxed">{message}</p>
-          <div className="flex gap-2">
-            <button onClick={onClose} className="flex-1 py-2.5 rounded-xl text-sm bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 transition-colors">Cancel</button>
-            <button onClick={onConfirm} className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-red-600 hover:bg-red-500 text-white transition-colors">Delete</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
+// Confirm modal moved to components/modals/confirm-modal.tsx
 
 // ─── Export CSV ───────────────────────────────────────────────────────────────
 function exportCSV(trades: Trade[]) {
@@ -235,23 +214,10 @@ export default function TradesPage() {
     return params
   }
 
-  const { data, isLoading, refetch } = useQuery({
-    queryKey: ['trades', market, status, mode, page],
-    queryFn:  () => fetch(`/api/trades?${buildParams(page)}`).then(r => r.json()),
-    // PERFORMANCE: Trades are fresh for 15s before background refetch.
-    // Real-time accuracy isn't needed — the bot writes to DB, not the UI.
-    staleTime: 15_000,
-    placeholderData: (prev: any) => prev,
-  })
+  const { data, isLoading, refetch, prefetchPage } = useTrades({ market, status, mode, page })
 
   // ── Prefetch on hover — zero-latency page navigation ──────────────────────
-  const prefetchPage = useCallback((p: number) => {
-    qc.prefetchQuery({
-      queryKey: ['trades', market, status, mode, p],
-      queryFn:  () => fetch(`/api/trades?${buildParams(p)}`).then(r => r.json()),
-      staleTime: 30_000,
-    })
-  }, [qc, market, status, mode]) // eslint-disable-line react-hooks/exhaustive-deps
+  // prefetchPage now provided by useTrades
 
   const trades: Trade[]        = data?.trades ?? []
   const pagination: Pagination = data?.pagination ?? { page: 1, limit: 50, total: 0, pages: 1, hasMore: false }
@@ -259,7 +225,7 @@ export default function TradesPage() {
 
   // ── Delete mutations ───────────────────────────────────────────────────────
   const deleteSingle = useMutation({
-    mutationFn: (id: string) => fetch(`/api/trades/${id}`, { method: 'DELETE' }).then(r => r.json()),
+    mutationFn: (id: string) => apiFetch(`/api/trades/${id}`, { method: 'DELETE' }),
     onMutate: async (id: string) => {
       await qc.cancelQueries({ queryKey: BOT_STATUS_QUERY_KEY })
       await qc.cancelQueries({ queryKey: ['trades', market, status, mode, page] })
@@ -284,10 +250,10 @@ export default function TradesPage() {
 
   const bulkDelete = useMutation({
     mutationFn: (payload: { type?: string; ids?: string[] }) =>
-      fetch('/api/trades/bulk-delete', {
+      apiFetch('/api/trades/bulk-delete', {
         method: 'DELETE', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-      }).then(r => r.json()),
+      }),
     onMutate: async (payload: { type?: string; ids?: string[] }) => {
       await qc.cancelQueries({ queryKey: BOT_STATUS_QUERY_KEY })
       await qc.cancelQueries({ queryKey: ['trades', market, status, mode, page] })

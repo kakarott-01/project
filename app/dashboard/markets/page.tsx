@@ -1,6 +1,9 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { apiFetch } from '@/lib/api-client'
+import dynamic from 'next/dynamic'
+const OtpModal = dynamic(() => import('@/components/modals/otp-modal'), { ssr: false })
 import {
   CheckCircle, ChevronDown, ChevronUp, Shield, ExternalLink,
   Eye, EyeOff, Pencil, X, Loader2, Lock, KeyRound, MailCheck, Plus,
@@ -17,10 +20,10 @@ interface SavedApi {
   isActive: boolean;
 }
 
-interface RevealedKeys {
-  apiKey: string;
-  apiSecret: string;
-  extra: Record<string, string>;
+import type { RevealedKeys } from '@/lib/hooks/use-exchange-otp'
+
+interface MeResponse {
+  email?: string;
 }
 
 const MARKETS = [
@@ -57,166 +60,7 @@ const MARKETS = [
   },
 ];
 
-// ── OTP Modal (for viewing/editing API keys) ──────────────────────────────────
-
-interface OtpModalProps {
-  email: string;
-  onVerified: () => void;
-  onClose: () => void;
-}
-
-function OtpModal({ email, onVerified, onClose }: OtpModalProps) {
-  const [digits, setDigits]   = useState(["", "", "", "", "", ""]);
-  const [error,  setError]    = useState("");
-  const [sent,   setSent]     = useState(false);
-  const [sending, setSending] = useState(false);
-  const [verifying, setVerifying] = useState(false);
-  const [resendCooldown, setResendCooldown] = useState(0);
-  const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
-
-  useEffect(() => { sendOtp(); }, []);
-
-  useEffect(() => {
-    if (resendCooldown <= 0) return;
-    const t = setTimeout(() => setResendCooldown(c => c - 1), 1000);
-    return () => clearTimeout(t);
-  }, [resendCooldown]);
-
-  async function sendOtp() {
-    setSending(true);
-    setError("");
-    const res  = await fetch("/api/exchange/send-reveal-otp", { method: "POST" });
-    const data = await res.json();
-    setSending(false);
-    if (res.ok) {
-      setSent(true);
-      setResendCooldown(60);
-      setTimeout(() => inputRefs.current[0]?.focus(), 100);
-    } else {
-      setError(data.error ?? "Failed to send OTP");
-    }
-  }
-
-  async function verify() {
-    const code = digits.join("");
-    if (code.length !== 6) return;
-    setVerifying(true);
-    setError("");
-    const res  = await fetch("/api/exchange/verify-reveal-otp", {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ otp: code }),
-    });
-    const data = await res.json();
-    setVerifying(false);
-    if (res.ok) {
-      onVerified();
-    } else {
-      setError(data.error ?? "Invalid OTP");
-      setDigits(["", "", "", "", "", ""]);
-      setTimeout(() => inputRefs.current[0]?.focus(), 50);
-    }
-  }
-
-  function handleDigit(val: string, idx: number) {
-    if (!/^\d*$/.test(val)) return;
-    const next = [...digits];
-    next[idx] = val.slice(-1);
-    setDigits(next);
-    if (val && idx < 5) inputRefs.current[idx + 1]?.focus();
-    if (next.every(d => d) && val) setTimeout(verify, 80);
-  }
-
-  function handleKeyDown(e: React.KeyboardEvent, idx: number) {
-    if (e.key === "Backspace" && !digits[idx] && idx > 0)
-      inputRefs.current[idx - 1]?.focus();
-  }
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: "rgba(3,7,18,0.85)", backdropFilter: "blur(4px)" }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div className="w-full max-w-sm bg-gray-900 border border-gray-800 rounded-2xl shadow-2xl overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-800">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-brand-500/15 flex items-center justify-center">
-              <Lock className="w-4 h-4 text-brand-500" />
-            </div>
-            <div>
-              <p className="text-sm font-semibold text-gray-100">Verify to view keys</p>
-              <p className="text-xs text-gray-500">Security check required</p>
-            </div>
-          </div>
-          <button onClick={onClose} className="text-gray-600 hover:text-gray-300 transition-colors">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div className="px-5 py-5">
-          {sending && !sent ? (
-            <div className="flex flex-col items-center py-4 gap-3">
-              <Loader2 className="w-6 h-6 text-brand-500 animate-spin" />
-              <p className="text-sm text-gray-400">Sending OTP to your email…</p>
-            </div>
-          ) : (
-            <>
-              <div className="flex items-start gap-2.5 bg-brand-500/5 border border-brand-500/15 rounded-xl px-3.5 py-3 mb-5">
-                <MailCheck className="w-4 h-4 text-brand-500 flex-shrink-0 mt-0.5" />
-                <p className="text-xs text-gray-400">
-                  A 6-digit code was sent to <span className="text-gray-200 font-medium">{email}</span>.
-                  Enter it below to view your API keys.
-                </p>
-              </div>
-
-              <div className="flex gap-2 justify-center mb-4">
-                {digits.map((d, i) => (
-                  <input
-                    key={i}
-                    ref={el => { inputRefs.current[i] = el; }}
-                    value={d}
-                    onChange={e => handleDigit(e.target.value, i)}
-                    onKeyDown={e => handleKeyDown(e, i)}
-                    maxLength={1}
-                    inputMode="numeric"
-                    autoFocus={i === 0 && sent}
-                    className="w-11 h-12 text-center text-lg font-semibold bg-gray-800 border border-gray-700 rounded-lg text-gray-100 focus:border-brand-500 focus:ring-1 focus:ring-brand-500/30 outline-none transition-all"
-                  />
-                ))}
-              </div>
-
-              {error && (
-                <p className="text-xs text-red-400 text-center mb-3">{error}</p>
-              )}
-
-              <button
-                onClick={verify}
-                disabled={digits.join("").length !== 6 || verifying}
-                className="w-full py-2.5 rounded-xl text-sm font-semibold transition-all
-                  bg-brand-500 hover:bg-brand-600 text-white
-                  disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed"
-              >
-                {verifying
-                  ? <span className="flex items-center justify-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />Verifying…</span>
-                  : "Verify & View Keys"
-                }
-              </button>
-
-              <button
-                onClick={sendOtp}
-                disabled={resendCooldown > 0 || sending}
-                className="w-full mt-2 py-2 text-xs text-gray-500 hover:text-gray-300 disabled:text-gray-700 disabled:cursor-not-allowed transition-colors"
-              >
-                {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : "Resend OTP"}
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
+// OTP modal moved to components/modals/otp-modal.tsx and lazy-loaded via dynamic import above.
 
 // ── Masked key display ────────────────────────────────────────────────────────
 
@@ -260,25 +104,7 @@ function ConnectedCard({ exch, market, userEmail, botActiveForMarket, onEdit }: 
   const [loading,      setLoading]      = useState(false);
   const [error,        setError]        = useState("");
 
-  async function handleOtpVerified() {
-    setShowOtpModal(false);
-    setLoading(true);
-    setError("");
-
-    const res = await fetch("/api/exchange/reveal", {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ marketType: market.id, exchangeName: exch.id }),
-    });
-    const data = await res.json();
-    setLoading(false);
-
-    if (res.ok) {
-      setRevealed(data);
-    } else {
-      setError(data.error ?? "Failed to load keys");
-    }
-  }
+  // Reveal handled by OtpModal (verify + reveal) — modal returns revealed keys via onVerified
 
   const allFields = [
     { label: exch.fields[0], value: revealed?.apiKey    ?? "" },
@@ -291,7 +117,8 @@ function ConnectedCard({ exch, market, userEmail, botActiveForMarket, onEdit }: 
       {showOtpModal && (
         <OtpModal
           email={userEmail}
-          onVerified={handleOtpVerified}
+          revealParams={{ marketType: market.id, exchangeName: exch.id }}
+          onVerified={(data) => { setShowOtpModal(false); setRevealed(data ?? null); }}
           onClose={() => setShowOtpModal(false)}
         />
       )}
@@ -418,28 +245,27 @@ function ExchangeForm({ exch, marketId, prefill, onSaved, onCancel, isEdit }: Ex
 
     const extra = exch.fields.slice(2).reduce((acc, f) => ({ ...acc, [f]: vals[f] ?? "" }), {});
 
-    const res = await fetch("/api/exchange", {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({
-        marketType:    marketId,
-        exchangeName:  exch.id,
-        apiKey,
-        apiSecret:     apiSec,
-        extraFields:   extra,
-      }),
-    });
+    try {
+      await apiFetch("/api/exchange", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          marketType:    marketId,
+          exchangeName:  exch.id,
+          apiKey,
+          apiSecret:     apiSec,
+          extraFields:   extra,
+        }),
+      });
 
-    const data = await res.json();
-    setSaving(false);
-
-    if (res.ok) {
       setSaved(true);
       setIsDirty(false);
       qc.invalidateQueries({ queryKey: ["exchange-apis"] });
       setTimeout(() => { onSaved(); }, 1200);
-    } else {
-      setError(data.error ?? "Failed to save keys");
+    } catch (err: any) {
+      setError(err?.message ?? "Failed to save keys");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -617,7 +443,7 @@ export default function MarketsPage() {
 
   const { data: existingApis } = useQuery<SavedApi[]>({
     queryKey: ["exchange-apis"],
-    queryFn:  () => fetch("/api/exchange").then(r => r.json()),
+    queryFn:  () => apiFetch("/api/exchange"),
   });
 
   // Fetch bot status to know which markets are actively running
@@ -626,9 +452,9 @@ export default function MarketsPage() {
   const botRunning      = botData?.status === 'running';
   const activeMarkets: string[] = botData?.activeMarkets ?? [];
 
-  const { data: meData } = useQuery({
+  const { data: meData } = useQuery<MeResponse | null>({
     queryKey: ["me"],
-    queryFn:  () => fetch("/api/me").then(r => r.json()).catch(() => null),
+    queryFn:  () => apiFetch<MeResponse>("/api/me").catch(() => null),
     staleTime: Infinity,
   });
   const userEmail = meData?.email ?? "your email";
@@ -642,19 +468,7 @@ export default function MarketsPage() {
     return botRunning && activeMarkets.includes(marketId);
   }
 
-  async function handleEditOtpVerified(marketId: string, exchId: string) {
-    setEditOtpModal(null);
-    const res = await fetch("/api/exchange/reveal", {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ marketType: marketId, exchangeName: exchId }),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      setEditPrefill(data);
-    }
-    setEditingKey(`${marketId}_${exchId}`);
-  }
+  // Editing reveal handled by OtpModal; modal will return keys via onVerified
 
   return (
     <div className="space-y-4 max-w-3xl mx-auto">
@@ -688,7 +502,14 @@ export default function MarketsPage() {
       {editOtpModal && (
         <OtpModal
           email={userEmail}
-          onVerified={() => handleEditOtpVerified(editOtpModal.marketId, editOtpModal.exchId)}
+          revealParams={{ marketType: editOtpModal.marketId, exchangeName: editOtpModal.exchId }}
+          onVerified={(data) => {
+            const mid = editOtpModal!.marketId
+            const eid = editOtpModal!.exchId
+            setEditOtpModal(null)
+            setEditPrefill(data ?? null)
+            setEditingKey(`${mid}_${eid}`)
+          }}
           onClose={() => setEditOtpModal(null)}
         />
       )}

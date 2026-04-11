@@ -1,6 +1,7 @@
 'use client'
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { apiFetch } from '@/lib/api-client'
 
 type Step = 'choose' | 'otp' | 'done'
 
@@ -24,20 +25,19 @@ export default function LoginPage() {
 
     setLoading(true)
     setAccessError('')
-    const res = await fetch('/api/access/verify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: accessCode.trim() }),
-    })
-
-    setLoading(false)
-    if (res.ok) {
+    try {
+      await apiFetch('/api/access/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: accessCode.trim() }),
+      })
       setAccessVerified(true)
       setAccessError('Access code verified. You may proceed.')
-    } else {
-      const data = await res.json()
+    } catch (err: any) {
       setAccessVerified(false)
-      setAccessError(data.error || 'Invalid access code.')
+      setAccessError(err?.message ?? 'Invalid access code.')
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -54,14 +54,18 @@ export default function LoginPage() {
       return
     }
     setLoading(true); setError('')
-    const res = await fetch('/api/access/send-otp', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email }),
-    })
-    setLoading(false)
-    if (res.ok) setStep('otp')
-    else setError('Could not send code. Check your email address.')
+    try {
+      await apiFetch('/api/access/send-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      })
+      setStep('otp')
+    } catch (e) {
+      setError('Could not send code. Check your email address.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   async function handleVerifyOtp() {
@@ -69,34 +73,34 @@ export default function LoginPage() {
     if (code.length !== 6) return
     setLoading(true); setError('')
 
-    const res = await fetch('/api/access/verify-otp', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, otp: code }),
-    })
-
-    setLoading(false)
-    if (res.ok) {
+    try {
+      await apiFetch('/api/access/verify-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, otp: code }),
+      })
       setStep('done')
       setTimeout(() => { window.location.href = '/dashboard' }, 800)
-    } else {
-      const data = await res.json()
-      const msg = data.error ?? 'Invalid or expired code.'
+    } catch (err: any) {
+      const status = err?.status
+      const msg = err?.message ?? 'Invalid or expired code.'
 
-      if (res.status === 403) {
+      if (status === 403) {
         setAccessVerified(false)
         setAccessError('Access code expired. Please verify again.')
         setAccessCode('')
         setStep('choose')
       }
 
-      if (res.status === 409) {
+      if (status === 409) {
         setError('User already exists. Please login.')
       } else {
         setError(msg)
       }
 
       setOtp(['','','','','',''])
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -104,16 +108,13 @@ export default function LoginPage() {
     if (!email) return
     setLoading(true); setError('')
     try {
-      const res = await fetch('/api/access/send-otp', {
+      await apiFetch('/api/access/send-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email }),
       })
-      if (!res.ok) {
-        setError('Could not resend code. Try again later.')
-      }
     } catch (e) {
-      setError('Network error while resending code')
+      setError('Could not resend code. Try again later.')
     } finally {
       setLoading(false)
     }

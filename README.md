@@ -7,7 +7,7 @@ The app combines:
 - A web control plane for auth, strategy configuration, exchange management, risk controls, backtests, and reporting
 - A FastAPI bot engine for market execution, scheduling, watchdog recovery, and backtest runs
 - A Postgres data layer for users, sessions, trades, strategies, risk settings, and bot history
-
+ 
 ## What It Does
 
 - Runs bots across `indian`, `crypto`, `commodities`, and `global` market groups

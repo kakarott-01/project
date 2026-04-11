@@ -1,4 +1,5 @@
 import type { QueryClient } from '@tanstack/react-query'
+import { apiFetch } from '@/lib/api-client'
 
 export const BOT_STATUS_QUERY_KEY = ['bot-status'] as const
 // FIX: Increased from 5s to 8s to reduce Neon connection pressure
@@ -34,11 +35,7 @@ export type BotStatusSnapshot = {
 }
 
 export async function fetchBotStatus(): Promise<BotStatusSnapshot> {
-  const response = await fetch('/api/bot/status', { cache: 'no-store' })
-  if (!response.ok) {
-    throw new Error(`Failed to fetch bot status (HTTP ${response.status})`)
-  }
-  return response.json()
+  return apiFetch<BotStatusSnapshot>('/api/bot/status', { cache: 'no-store' })
 }
 
 export function isValidBotSnapshot(data: unknown): data is BotStatusSnapshot {

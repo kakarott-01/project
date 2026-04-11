@@ -7,6 +7,7 @@ import {
   AlertTriangle, Loader2, Power, ShieldAlert, Square,
   X, Zap, Play, Swords, Shield,
 } from 'lucide-react'
+import dynamic from 'next/dynamic'
 import { Button } from '@/components/ui/button'
 import { InlineAlert } from '@/components/ui/inline-alert'
 import { StatusBadge } from '@/components/ui/status-badge'
@@ -21,6 +22,10 @@ const MARKETS = [
   { id: 'global',      label: 'Forex',         shortLabel: 'Forex' },
   { id: 'commodities', label: 'Commodities',   shortLabel: 'Commodities' },
 ] as const
+
+const StopAllModal = dynamic(() => import('@/components/modals/stop-all-modal'), { ssr: false })
+const StartMarketModal = dynamic(() => import('@/components/modals/start-market-modal'), { ssr: false })
+const MarketStopModal = dynamic(() => import('@/components/modals/market-stop-modal'), { ssr: false })
 
 type MarketId = typeof MARKETS[number]['id']
 
@@ -43,250 +48,30 @@ type StrategyConfigDataResponse = {
   }>
 }
 
+type StopMarketResponse = {
+  success?: boolean
+  stoppedMarket: MarketId
+  mode: 'graceful' | 'close_all'
+  remainingMarkets?: MarketId[]
+  openPositionsClosed?: number
+  // snapshot fields (partial)
+  status?: string
+  stopMode?: string | null
+  activeMarkets?: MarketId[]
+  openTradeCount?: number
+  perMarketOpenTrades?: Record<string, number>
+  sessions?: any[]
+}
+
 async function safeJson(res: Response): Promise<any> {
   try { return await res.json() } catch { return {} }
 }
 
-// ── Stop ALL modal ────────────────────────────────────────────────────────────
-function StopAllModal({
-  openTradeCount,
-  hasLiveMarkets,
-  onCloseAll,
-  onGraceful,
-  onClose,
-}: {
-  openTradeCount:  number
-  hasLiveMarkets:  boolean
-  onCloseAll:      () => void
-  onGraceful:      () => void
-  onClose:         () => void
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(3,7,18,0.88)', backdropFilter: 'blur(4px)' }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
-    >
-      <div className="w-full max-w-lg rounded-3xl border border-gray-800 bg-gray-950 shadow-2xl">
-        <div className="flex items-center justify-between border-b border-gray-800 px-5 py-4">
-          <div>
-            <p className="text-sm font-semibold text-gray-100">Stop all active sessions</p>
-            <p className="mt-1 text-xs text-gray-500">
-              {openTradeCount} open trade{openTradeCount === 1 ? '' : 's'} still need protection
-            </p>
-          </div>
-          <button onClick={onClose} className="rounded-full p-1 text-gray-500 transition hover:bg-gray-800 hover:text-gray-200">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
+// StopAllModal moved to components/modals and lazy-loaded
 
-        <div className="space-y-4 px-5 py-5">
-          {hasLiveMarkets && (
-            <InlineAlert tone="danger" title="Live positions are exposed if monitoring stops.">
-              Stopping the bot removes automated SL/TP supervision for live positions until you restart or close them manually.
-            </InlineAlert>
-          )}
+// StartMarketModal moved to components/modals and lazy-loaded
 
-          <button type="button" onClick={onCloseAll}
-            className="w-full rounded-2xl border border-red-500/25 bg-red-500/10 px-4 py-4 text-left transition hover:bg-red-500/15">
-            <div className="flex items-start gap-3">
-              <div className="rounded-2xl bg-red-500/15 p-2">
-                <Zap className="h-4 w-4 text-red-300" />
-              </div>
-              <div>
-                <p className="text-sm font-semibold text-red-200">Close all positions and stop</p>
-                <p className="mt-1 text-xs text-red-100/80">Use this when you need a hard stop right now.</p>
-              </div>
-            </div>
-          </button>
-
-          <button type="button" onClick={onGraceful}
-            className="w-full rounded-2xl border border-brand-500/25 bg-brand-500/10 px-4 py-4 text-left transition hover:bg-brand-500/15">
-            <div className="flex items-start gap-3">
-              <div className="rounded-2xl bg-brand-500/15 p-2">
-                <ShieldAlert className="h-4 w-4 text-brand-400" />
-              </div>
-              <div>
-                <p className="text-sm font-semibold text-brand-300">Drain gracefully</p>
-                <p className="mt-1 text-xs text-gray-300/80">No new entries. Existing trades remain monitored until they exit.</p>
-              </div>
-            </div>
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ── Confirm start market modal ────────────────────────────────────────────────
-function StartMarketModal({
-  market,
-  isLive,
-  strategyKeys,
-  warnings,
-  onConfirm,
-  onClose,
-}: {
-  market:       string
-  isLive:       boolean
-  strategyKeys: string[]
-  warnings:     string[]
-  onConfirm:    () => void
-  onClose:      () => void
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(3,7,18,0.88)', backdropFilter: 'blur(4px)' }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
-    >
-      <div className="w-full max-w-sm rounded-3xl border border-gray-800 bg-gray-950 shadow-2xl overflow-hidden">
-        <div className={cn(
-          'flex items-center gap-3 px-5 py-4 border-b',
-          isLive
-            ? 'border-red-900/40 bg-red-950/20'
-            : 'border-brand-500/20 bg-brand-500/5'
-        )}>
-          <div className={cn(
-            'w-9 h-9 rounded-2xl flex items-center justify-center flex-shrink-0',
-            isLive ? 'bg-red-500/15' : 'bg-brand-500/15'
-          )}>
-            <Play className={cn('h-4 w-4', isLive ? 'text-red-400' : 'text-brand-400')} />
-          </div>
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-gray-100">Start {market}</p>
-            <p className={cn('text-xs mt-0.5', isLive ? 'text-red-400' : 'text-gray-500')}>
-              {isLive ? '🔴 LIVE mode — real funds at risk' : '🟡 Paper mode — simulated trading'}
-            </p>
-          </div>
-          <button onClick={onClose} className="ml-auto text-gray-600 hover:text-gray-300 transition-colors flex-shrink-0">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div className="px-5 py-5 space-y-4">
-          {isLive && (
-            <InlineAlert tone="danger" title="Real capital will be used">
-              All signals for {market} will place real orders on the exchange. Losses are unrecoverable.
-            </InlineAlert>
-          )}
-
-          {warnings.length > 0 && (
-            <InlineAlert tone="warning" title="Potential strategy conflicts detected">
-              <div className="space-y-1">
-                {warnings.map((warning) => (
-                  <p key={warning}>{warning}</p>
-                ))}
-              </div>
-            </InlineAlert>
-          )}
-
-          {strategyKeys.length > 0 && (
-            <div className="rounded-2xl border border-gray-800 bg-gray-900/60 px-4 py-3 space-y-2">
-              <p className="text-xs text-gray-500 uppercase tracking-wide font-medium">Strategies to activate</p>
-              {strategyKeys.map((key) => (
-                <div key={key} className="flex items-center gap-2">
-                  <span className={cn(
-                    'w-1.5 h-1.5 rounded-full flex-shrink-0',
-                    isLive ? 'bg-red-400' : 'bg-brand-500'
-                  )} />
-                  <span className="text-xs font-mono text-gray-300">{key}</span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div className="flex gap-2 pt-1">
-            <button onClick={onClose}
-              className="flex-1 py-2.5 rounded-xl text-sm bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 transition-colors">
-              Cancel
-            </button>
-            <button
-              onClick={onConfirm}
-              className={cn(
-                'flex-1 py-2.5 rounded-xl text-sm font-semibold text-white transition-colors',
-                isLive
-                  ? 'bg-red-600 hover:bg-red-500'
-                  : 'bg-brand-500 hover:bg-brand-600'
-              )}
-            >
-              {isLive ? 'Start Live Trading' : 'Start Market'}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ── Per-market stop modal ─────────────────────────────────────────────────────
-function MarketStopModal({
-  market,
-  isLive,
-  openTradeCount,
-  onDrain,
-  onClose,
-}: {
-  market:         string
-  isLive:         boolean
-  openTradeCount: number
-  onDrain:        () => void
-  onClose:        () => void
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(3,7,18,0.88)', backdropFilter: 'blur(4px)' }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
-    >
-      <div className="w-full max-w-sm rounded-3xl border border-gray-800 bg-gray-950 shadow-2xl overflow-hidden">
-        <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-800">
-          <div className="w-9 h-9 rounded-2xl bg-amber-500/15 flex items-center justify-center flex-shrink-0">
-            <Square className="h-4 w-4 text-amber-400" />
-          </div>
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-gray-100">Stop {market}</p>
-            <p className="text-xs text-gray-500 mt-0.5">
-              {openTradeCount === -1 ? (
-                'Fetching latest positions...'
-              ) : openTradeCount > 0 ? (
-                `${openTradeCount} open position${openTradeCount !== 1 ? 's' : ''} · other markets continue running`
-              ) : (
-                'No open positions · other markets continue running'
-              )}
-            </p>
-          </div>
-          <button onClick={onClose} className="ml-auto text-gray-600 hover:text-gray-300 transition-colors flex-shrink-0">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div className="px-5 py-5 space-y-3">
-          {isLive && openTradeCount > 0 && (
-            <InlineAlert tone="danger" title="Live positions need manual supervision if unmonitored.">
-              After stopping, open positions won't have automated SL/TP until you restart or close them.
-            </InlineAlert>
-          )}
-
-          <button type="button" onClick={onDrain}
-            className="w-full rounded-2xl border border-brand-500/25 bg-brand-500/10 px-4 py-4 text-left transition hover:bg-brand-500/15 cursor-pointer">
-            <div className="flex items-start gap-3">
-              <div className="rounded-2xl bg-brand-500/15 p-2">
-                <Shield className="h-4 w-4 text-brand-400" />
-              </div>
-              <div>
-                <p className="text-sm font-semibold text-brand-300">Drain &amp; stop</p>
-                <p className="mt-1 text-xs text-gray-300/80">
-                  Stop new entries for {market}. Existing positions close on their own exit signals.
-                </p>
-              </div>
-            </div>
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
+// MarketStopModal moved to components/modals and lazy-loaded
 
 // ── Main component ────────────────────────────────────────────────────────────
 export function BotControls({ botData }: { botData: any }) {
@@ -368,14 +153,7 @@ export function BotControls({ botData }: { botData: any }) {
   const syncMutation = useMutation({
     mutationKey: ['bot-start'],
     mutationFn: async ({ markets }: { markets: MarketId[] }) => {
-      const res  = await fetch('/api/bot/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ markets }),
-      })
-      const data = await safeJson(res)
-      if (!res.ok) throw new Error(data.error ?? `Failed to sync bot (HTTP ${res.status})`)
-      return data
+      return apiFetch('/api/bot/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ markets }) })
     },
     onMutate: async (vars: { markets: MarketId[] }) => {
       await qc.cancelQueries({ queryKey: BOT_STATUS_QUERY_KEY })
@@ -414,14 +192,7 @@ export function BotControls({ botData }: { botData: any }) {
 
   const stopAllMutation = useMutation({
     mutationFn: async (mode: 'close_all' | 'graceful') => {
-      const res  = await fetch('/api/bot/stop', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode }),
-      })
-      const data = await safeJson(res)
-      if (!res.ok) throw new Error(data.error ?? `Failed to stop bot (HTTP ${res.status})`)
-      return data
+      return apiFetch('/api/bot/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }) })
     },
     onMutate: async (mode: 'close_all' | 'graceful') => {
       await qc.cancelQueries({ queryKey: BOT_STATUS_QUERY_KEY })
@@ -460,14 +231,7 @@ export function BotControls({ botData }: { botData: any }) {
 
   const stopMarketMutation = useMutation({
     mutationFn: async ({ marketType, mode }: { marketType: MarketId; mode: 'graceful' | 'close_all' }) => {
-      const res  = await fetch('/api/bot/stop-market', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ marketType, mode }),
-      })
-      const data = await safeJson(res)
-      if (!res.ok) throw new Error(data.error ?? `Failed to stop ${marketType}`)
-      return data
+      return apiFetch<StopMarketResponse>('/api/bot/stop-market', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ marketType, mode }) })
     },
     onMutate: async (vars: { marketType: MarketId; mode: 'graceful' | 'close_all' }) => {
       await qc.cancelQueries({ queryKey: BOT_STATUS_QUERY_KEY })
@@ -487,7 +251,7 @@ export function BotControls({ botData }: { botData: any }) {
       pushToast({ tone: 'error', title: `Failed to stop ${vars.marketType}`, description: err.message })
       if (context?.previous && isValidBotSnapshot(context.previous)) qc.setQueryData(BOT_STATUS_QUERY_KEY, context.previous)
     },
-    onSuccess: (data) => {
+    onSuccess: (data: StopMarketResponse) => {
       const label = MARKETS.find((m) => m.id === data.stoppedMarket)?.label ?? data.stoppedMarket
       pushToast({
         tone: data.mode === 'close_all' ? 'warning' : 'success',

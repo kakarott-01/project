@@ -19,6 +19,7 @@ import { z } from 'zod'
 import { getBotStatusSnapshot } from '@/lib/bot/status-snapshot'
 import { acquireBotLock } from '@/lib/bot-lock'
 import { guardErrorResponse, requireAccess } from '@/lib/guards'
+import { postToBotEngine } from '@/lib/bot-engine-client'
 
 const schema = z.object({
   marketType: z.enum(['indian', 'crypto', 'commodities', 'global']),
@@ -171,25 +172,9 @@ async function _handleStopMarket(req: NextRequest, userId: string, marketType: s
   // ── Notify bot engine ───────────────────────────────────────────────────
   try {
     if (remainingMarkets.length > 0) {
-      await fetch(`${process.env.BOT_ENGINE_URL}/bot/sync`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Bot-Secret': process.env.BOT_ENGINE_SECRET!,
-        },
-        body: JSON.stringify({ user_id: userId, markets: remainingMarkets }),
-        signal: AbortSignal.timeout(8_000),
-      })
+      await postToBotEngine('/bot/sync', { user_id: userId, markets: remainingMarkets }, 8_000)
     } else {
-      await fetch(`${process.env.BOT_ENGINE_URL}/bot/stop`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Bot-Secret': process.env.BOT_ENGINE_SECRET!,
-        },
-        body: JSON.stringify({ user_id: userId }),
-        signal: AbortSignal.timeout(8_000),
-      })
+      await postToBotEngine('/bot/stop', { user_id: userId }, 8_000)
     }
   } catch (err) {
     console.warn(`[stop-market] Engine notify failed (non-fatal):`, err)

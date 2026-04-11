@@ -4,7 +4,8 @@ import {
   TrendingUp, TrendingDown, Activity, DollarSign,
   BarChart3, Layers, ArrowUpRight,
 } from 'lucide-react'
-import { PnlChart } from '@/components/charts/pnl-chart'
+import dynamic from 'next/dynamic'
+const PnlChart = dynamic(() => import('@/components/charts/pnl-chart').then(m => m.PnlChart), { ssr: false, loading: () => <div className="h-40 flex items-center justify-center text-sm text-gray-600">Loading chart…</div> })
 import { Trade, TradeTable} from '@/components/dashboard/trade-table'
 import { BotControls } from '@/components/dashboard/bot-controls'
 import { useBotStatusQuery } from '@/lib/use-bot-status-query'

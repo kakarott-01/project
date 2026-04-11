@@ -1,5 +1,6 @@
 'use client'
 import { useState, useEffect, useRef } from 'react'
+import { apiFetch } from '@/lib/api-client'
 import { useRouter } from 'next/navigation'
 
 export default function AccessPage() {
@@ -26,22 +27,26 @@ export default function AccessPage() {
     e.preventDefault()
     if (!code.trim() || locked) return
     setLoading(true); setError('')
-    const res  = await fetch('/api/access/verify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: code.trim() }),
-    })
-    const data = await res.json()
-    setLoading(false)
-    if (res.ok) {
-  window.location.href = '/dashboard'
-}
-    else if (res.status === 429) { setLocked(true); setError('Too many attempts. IP locked for 30 minutes.') }
-    else {
-      setRemaining(data.attemptsRemaining ?? remaining - 1)
-      setError(data.error ?? 'Invalid code')
-      setCode(''); inputRef.current?.focus()
-      if ((data.attemptsRemaining ?? 0) <= 0) setLocked(true)
+    try {
+      await apiFetch('/api/access/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: code.trim() }),
+      })
+      setLoading(false)
+      window.location.href = '/dashboard'
+    } catch (err: any) {
+      setLoading(false)
+      if (err?.status === 429) {
+        setLocked(true)
+        setError('Too many attempts. IP locked for 30 minutes.')
+      } else {
+        const attempts = err?.data?.attemptsRemaining ?? Math.max(0, remaining - 1)
+        setRemaining(attempts)
+        setError(err?.message ?? 'Invalid code')
+        setCode(''); inputRef.current?.focus()
+        if ((err?.data?.attemptsRemaining ?? 0) <= 0) setLocked(true)
+      }
     }
   }
 

@@ -1,4 +1,4 @@
-type ApiError = Error & { status?: number }
+type ApiError = Error & { status?: number; data?: any }
 
 export async function apiFetch<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
   const res = await fetch(input, init)
@@ -9,6 +9,7 @@ export async function apiFetch<T>(input: RequestInfo | URL, init?: RequestInit):
       typeof body?.error === 'string' ? body.error : `HTTP ${res.status}`,
     ) as ApiError
     error.status = res.status
+    error.data = body
     throw error
   }
 
