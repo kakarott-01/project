@@ -102,10 +102,14 @@ class Watchdog:
                 markets = ctx.markets
                 await self._scheduler.stop_user_bot(user_id)
                 await asyncio.sleep(2)
+                # Use the current time as the restarted bot's `started_at`
+                # so the watchdog doesn't immediately treat an old
+                # `started_at` (from previous runs) as a missing heartbeat
+                # and trigger another restart loop.
                 await self._scheduler.start_user_bot(
                     user_id,
                     markets,
-                    started_at=ctx.started_at,
+                    started_at=now,
                 )
                 logger.info(
                     f"🐕 Bot restarted for user={user_id[:8]}… markets={markets} "
