@@ -2,8 +2,7 @@
 
 import { useMutationState, useQueryClient } from '@tanstack/react-query'
 import { LogOut, Bell, Menu, AlertTriangle, X } from 'lucide-react'
-import { useState } from 'react'
-import { useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import { MobileSidebar } from '@/components/dashboard/sidebar'
 import { useBotStatusQuery } from '@/lib/use-bot-status-query'
 import { formatElapsedDuration, getSessionDurationMs } from '@/lib/time'
@@ -23,14 +22,19 @@ export function TopBar({ user }: TopBarProps) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [isSigningOut,  setIsSigningOut]  = useState(false)
   const [sessionExpired, setSessionExpired] = useState(false)
-  const now = Date.now()
+
+  // FIX: Live clock — ticks every second so the elapsed timer updates smoothly
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
 
   useEffect(() => {
     try {
       const v = window.localStorage.getItem('sessionExpired')
       if (v === '1') {
         setSessionExpired(true)
-        // Clear immediately so it doesn't persist across re-login
         window.localStorage.removeItem('sessionExpired')
       }
     } catch (_) {}
@@ -63,6 +67,8 @@ export function TopBar({ user }: TopBarProps) {
     pendingStarts.flatMap((entry) => Array.isArray(entry?.markets) ? entry.markets : []),
   ))
   const isStarting = !isRunning && pendingMarkets.length > 0
+
+  // FIX: Use the live `now` state so the timer ticks every second
   const runTime = isRunning && botData?.started_at
     ? formatElapsedDuration(getSessionDurationMs(botData.started_at, null, now))
     : ''
@@ -78,7 +84,6 @@ export function TopBar({ user }: TopBarProps) {
     } catch {
       // Best effort
     } finally {
-      // clear relevant cache to avoid stale user data after logout
       try { qc.removeQueries({ queryKey: QUERY_KEYS.ME }) } catch (_) { qc.removeQueries() }
       window.location.href = '/login'
     }
