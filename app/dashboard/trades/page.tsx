@@ -1,9 +1,10 @@
-"use client"
+'use client'
 import { useState, useCallback } from 'react'
 import useTrades from '@/lib/hooks/use-trades'
 import { QUERY_KEYS } from '@/lib/query-keys'
 import { apiFetch } from '@/lib/api-client'
 import dynamic from 'next/dynamic'
+import { useToastStore } from '@/lib/toast-store'
 const ConfirmModal = dynamic(() => import('@/components/modals/confirm-modal').then(m => m.ConfirmModal), { ssr: false })
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { BOT_STATUS_QUERY_KEY, isValidBotSnapshot } from '@/lib/bot-status-client'
@@ -47,14 +48,7 @@ const STATUSES = ['all', 'open', 'closed', 'failed', 'cancelled']
 const MODES    = ['all', 'paper', 'live'] as const
 
 // ─── Toast ────────────────────────────────────────────────────────────────────
-function useToast() {
-  const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null)
-  const show = useCallback((msg: string, type: 'success' | 'error' = 'success') => {
-    setToast({ msg, type })
-    setTimeout(() => setToast(null), 3000)
-  }, [])
-  return { toast, show }
-}
+// Use centralized toast store
 
 // Confirm modal moved to components/modals/confirm-modal.tsx
 
@@ -191,7 +185,10 @@ function StatCard({
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function TradesPage() {
   const qc = useQueryClient()
-  const { toast, show: showToast } = useToast()
+  const toasts = useToastStore((s) => s.toasts)
+  const pushToast = useToastStore((s) => s.push)
+  const latestToast = toasts.length ? toasts[toasts.length - 1] : null
+  const showToast = (msg: string, type: 'success' | 'error' = 'success') => pushToast({ title: msg, tone: type })
 
   // ── Filter state ───────────────────────────────────────────────────────────
   const [market,   setMarket]   = useState('all')
@@ -312,11 +309,11 @@ export default function TradesPage() {
     <div className="space-y-4 max-w-6xl mx-auto">
 
       {/* Toast */}
-      {toast && (
+      {latestToast && (
         <div className={`fixed top-4 right-4 z-50 flex items-center gap-2 px-4 py-3 rounded-xl shadow-2xl text-sm font-medium border ${
-          toast.type === 'success' ? 'bg-brand-500/15 border-brand-500/30 text-brand-500' : 'bg-red-900/20 border-red-800/30 text-red-400'
+          latestToast.tone === 'success' ? 'bg-brand-500/15 border-brand-500/30 text-brand-500' : 'bg-red-900/20 border-red-800/30 text-red-400'
         }`}>
-          {toast.type === 'success' ? '✓' : '✗'} {toast.msg}
+          {latestToast.tone === 'success' ? '✓' : '✗'} {latestToast.title}
         </div>
       )}
 

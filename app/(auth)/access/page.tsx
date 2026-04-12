@@ -70,26 +70,26 @@ export default function AccessPage() {
             <svg width="13" height="13" fill="none" stroke="#f59e0b" strokeWidth={2} viewBox="0 0 24 24">
               <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
             </svg>
-            <span className="text-[11px] text-[#f59e0b] font-semibold uppercase" style={{ letterSpacing: '0.06em' }}>Private Access</span>
+            <span className="text-[11px] text-[#f59e0b] font-semibold uppercase tracking-[0.06em]">Private Access</span>
           </div>
 
           <h1 className="text-[20px] font-semibold text-gray-100 mb-1">Enter access code</h1>
           <p className="text-sm text-gray-400 mb-5">Single-use code required. Expires in {mins}:{secs}</p>
 
           <div className="h-3 bg-[#1f2937] rounded-full mb-5 overflow-hidden">
-            <div style={{ width: `${timerPct}%`, background: timeLeft < 120 ? '#ef4444' : '#1D9E75' }} className="h-full rounded-full transition-all" />
+            <div style={{ width: `${timerPct}%` }} className={`h-full rounded-full transition-all ${timeLeft < 120 ? 'bg-red-500' : 'bg-[#1D9E75]'}`} />
           </div>
 
           <form onSubmit={handleSubmit}>
-            <div className="flex justify-between items-center mb-2">
-              <span className="text-xs text-gray-400 font-medium">Access Code</span>
-              <div className="flex items-center gap-1.5">
-                <span className="text-[11px] text-gray-500">Attempts:</span>
-                {[0,1,2].map(i => (
-                  <div key={i} className="w-2 h-2 rounded-full" style={{ background: i < remaining ? '#ef4444' : '#374151' }} />
-                ))}
-              </div>
-            </div>
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-xs text-gray-400 font-medium">Access Code</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] text-gray-500">Attempts:</span>
+                    {[0,1,2].map(i => (
+                      <div key={i} className={`w-2 h-2 rounded-full ${i < remaining ? 'bg-red-500' : 'bg-[#374151]'}`} />
+                    ))}
+                  </div>
+                </div>
 
             <input
               ref={inputRef}
@@ -104,7 +104,7 @@ export default function AccessPage() {
 
             {error && (
               <div className="flex items-center gap-2 bg-red-100 border border-red-300 rounded-md p-3 mb-3 text-red-500 text-sm">
-                <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" style={{ flexShrink:0 }}>
+                <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" className="flex-shrink-0">
                   <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
                   <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
                 </svg>
@@ -132,7 +132,7 @@ export default function AccessPage() {
               { dot:'#ef4444', text:'3 wrong attempts locks your IP for 30 minutes' },
             ].map((item, i) => (
               <div key={i} className="flex items-start gap-2.5 mb-2">
-                <div className="w-1.5 h-1.5 rounded-full mt-1" style={{ background: item.dot }} />
+                <div className={`w-1.5 h-1.5 rounded-full mt-1 ${item.dot === '#ef4444' ? 'bg-red-500' : 'bg-[#1D9E75]'}`} />
                 <span className="text-sm text-gray-400">{item.text}</span>
               </div>
             ))}

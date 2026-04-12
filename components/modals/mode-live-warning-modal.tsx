@@ -14,8 +14,7 @@ export default function ModeLiveWarningModal({ marketType, onConfirm, onClose }:
 }) {
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(3,7,18,0.85)', backdropFilter: 'blur(4px)' }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[rgba(3,7,18,0.85)] backdrop-blur-sm"
       onClick={e => { if (e.target === e.currentTarget) onClose() }}
     >
       <div className="w-full max-w-sm bg-gray-900 border border-red-900/40 rounded-2xl shadow-2xl overflow-hidden">
@@ -24,9 +23,12 @@ export default function ModeLiveWarningModal({ marketType, onConfirm, onClose }:
             <AlertTriangle className="w-4 h-4 text-red-400" />
           </div>
           <div>
-            <p className="text-sm font-semibold text-red-300">Enable Live Trading</p>
-            <p className="text-xs text-red-400/70">{MARKET_LABELS[marketType] ?? marketType}</p>
+            <p className="text-sm font-semibold text-red-300">Enable Live Mode</p>
+            <p className="text-xs text-gray-500">Action requires confirmation</p>
           </div>
+          <button onClick={onClose} className="ml-auto text-gray-600 hover:text-gray-300">
+            <X className="w-4 h-4" />
+          </button>
         </div>
 
         <div className="px-5 py-5 space-y-4">

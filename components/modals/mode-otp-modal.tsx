@@ -66,8 +66,7 @@ export default function ModeOtpModal({ email, onVerified, onClose }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(3,7,18,0.85)', backdropFilter: 'blur(4px)' }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[rgba(3,7,18,0.85)] backdrop-blur-sm"
       onClick={e => { if (e.target === e.currentTarget) onClose() }}
     >
       <div className="w-full max-w-sm bg-gray-900 border border-gray-800 rounded-2xl shadow-2xl overflow-hidden">
@@ -77,8 +76,8 @@ export default function ModeOtpModal({ email, onVerified, onClose }: Props) {
               <Lock className="w-4 h-4 text-red-400" />
             </div>
             <div>
-              <p className="text-sm font-semibold text-gray-100">Confirm Live Trading</p>
-              <p className="text-xs text-gray-500">OTP sent to your email</p>
+              <p className="text-sm font-semibold text-gray-100">Verify to view keys</p>
+              <p className="text-xs text-gray-500">Security check required</p>
             </div>
           </div>
           <button onClick={onClose} className="text-gray-600 hover:text-gray-300 transition-colors">

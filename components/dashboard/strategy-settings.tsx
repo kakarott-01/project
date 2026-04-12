@@ -19,6 +19,8 @@ import { Button } from "@/components/ui/button";
 import { InlineAlert } from "@/components/ui/inline-alert";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { InfoTip } from "@/components/ui/tooltip";
+import NumberField from '@/components/dashboard/strategy-settings/NumberField'
+import { defaultStrategySettings, toStrategyPayload } from '@/components/dashboard/strategy-settings/helpers'
 import { useToastStore } from "@/lib/toast-store";
 import { isBotLocked } from "@/lib/bot-lock";
 import { useBotStatusQuery } from '@/lib/use-bot-status-query';
@@ -117,39 +119,6 @@ type StrategyItem = {
   };
 };
 
-function defaultStrategySettings() {
-  return {
-    priority: "MEDIUM" as const,
-    cooldownAfterTradeSec: 0,
-    capitalAllocation: {
-      perTradePercent: 10,
-      maxActivePercent: 25,
-    },
-    health: {
-      minWinRatePct: 30,
-      maxDrawdownPct: 15,
-      maxLossStreak: 5,
-      isAutoDisabled: false,
-      autoDisabledReason: null,
-      lastTradeAt: null,
-    },
-  };
-}
-
-function toStrategyPayload(
-  strategySettings: RuntimeConfig["strategySettings"],
-) {
-  return Object.fromEntries(
-    Object.entries(strategySettings).map(([key, settings]) => [
-      key,
-      {
-        priority: settings.priority,
-        cooldownAfterTradeSec: settings.cooldownAfterTradeSec,
-        capitalAllocation: settings.capitalAllocation,
-      },
-    ]),
-  );
-}
 
 function marketCategory(market: MarketId) {
   return MARKETS.find((item) => item.id === market)?.publicLabel ?? "CRYPTO";
@@ -159,50 +128,7 @@ function marketCategory(market: MarketId) {
 
 const AggressiveModeModal = dynamic(() => import('@/components/modals/aggressive-mode-modal'), { ssr: false })
 
-function NumberField({
-  label,
-  tip,
-  value,
-  min,
-  max,
-  step = 1,
-  suffix = "",
-  disabled,
-  onChange,
-}: {
-  label: string;
-  tip: string;
-  value: number;
-  min: number;
-  max: number;
-  step?: number;
-  suffix?: string;
-  disabled?: boolean;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <label className="space-y-1.5">
-      <span className="flex items-center gap-2 text-xs text-gray-500">
-        {label}
-        <InfoTip text={tip} />
-      </span>
-      <input
-        type="number"
-        min={min}
-        max={max}
-        step={step}
-        disabled={disabled}
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value) || min)}
-        className="w-full rounded-xl border border-gray-800 bg-gray-900 px-3 py-2.5 text-sm text-gray-100 disabled:opacity-60"
-      />
-      <p className="text-[11px] text-gray-600">
-        Range {min} to {max}
-        {suffix}
-      </p>
-    </label>
-  );
-}
+// NumberField, defaultStrategySettings and toStrategyPayload moved to helpers/NumberField
 
 // ── Market section summary badges ─────────────────────────────────────────────
 function MarketSummaryBadges({

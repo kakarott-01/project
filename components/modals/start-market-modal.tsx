@@ -15,8 +15,7 @@ export default function StartMarketModal({ market, isLive, strategyKeys, warning
 }) {
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(3,7,18,0.88)', backdropFilter: 'blur(4px)' }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[rgba(3,7,18,0.88)] backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
       <div className="w-full max-w-sm rounded-3xl border border-gray-800 bg-gray-950 shadow-2xl overflow-hidden">

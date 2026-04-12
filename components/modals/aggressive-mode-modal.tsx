@@ -13,7 +13,7 @@ export default function AggressiveModeModal({ market, onCancel, onConfirm }: {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(3,7,18,0.88)', backdropFilter: 'blur(4px)' }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[rgba(3,7,18,0.88)] backdrop-blur-sm"
       onClick={(event) => { if (event.target === event.currentTarget) onCancel() }}
     >
       <div className="w-full max-w-lg rounded-3xl border border-red-500/20 bg-gray-950 shadow-2xl">
