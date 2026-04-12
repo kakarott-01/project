@@ -1,5 +1,5 @@
 'use client'
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, memo } from 'react'
 import { apiFetch } from '@/lib/api-client'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { QUERY_KEYS } from '@/lib/query-keys'
@@ -150,7 +150,7 @@ function StatCard({
   )
 }
 
-function BotSessionRow({
+const BotSessionRow = memo(function BotSessionRow({
   session,
   now,
   onDelete,
@@ -212,7 +212,7 @@ function BotSessionRow({
       </td>
     </tr>
   )
-}
+})
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function BotHistoryPage() {
@@ -244,6 +244,7 @@ export default function BotHistoryPage() {
   const { data, isLoading } = useQuery<{ sessions: BotSession[]; pagination: Pagination }>({
     queryKey: QUERY_KEYS.BOT_HISTORY({ page, mode: modeFilter, exchange: exchFilter, from: fromDate, to: toDate }),
     queryFn:  () => apiFetch(`/api/bot-history?${params}`),
+    placeholderData: (prev: any) => prev,
   })
 
   const deleteMut = useMutation({

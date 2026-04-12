@@ -1,6 +1,6 @@
 'use client'
 
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
 import { QUERY_KEYS } from '@/lib/query-keys'
 import { apiFetch } from '@/lib/api-client'
 import { useCallback } from 'react'
@@ -44,7 +44,12 @@ export type TradesResponse = {
   }
 }
 
-export default function useTrades({ market = 'all', status = 'all', mode = 'all', page = 1 } = {}) {
+export default function useTrades({ market = 'all', status = 'all', mode = 'all', page = 1 } = {}): {
+  data?: TradesResponse
+  isLoading: boolean
+  refetch: UseQueryResult<TradesResponse>['refetch']
+  prefetchPage: (p: number) => void
+} {
   const qc = useQueryClient()
 
   const buildParams = useCallback((p: number) => {
