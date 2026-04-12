@@ -21,6 +21,9 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { InfoTip } from "@/components/ui/tooltip";
 import NumberField from '@/components/dashboard/strategy-settings/NumberField'
 import { defaultStrategySettings, toStrategyPayload } from '@/components/dashboard/strategy-settings/helpers'
+import CapitalCard from '@/components/dashboard/strategy-settings/CapitalCard'
+import StrategyCard from '@/components/dashboard/strategy-settings/StrategyCard'
+import PerStrategySettingsCard from '@/components/dashboard/strategy-settings/PerStrategySettingsCard'
 import { useToastStore } from "@/lib/toast-store";
 import { isBotLocked } from "@/lib/bot-lock";
 import { useBotStatusQuery } from '@/lib/use-bot-status-query';
@@ -280,21 +283,7 @@ export function StrategySettings() {
   // const botIsLocked = botData?.status === 'running' || botData?.status === 'stopping'
   const activeMarkets: string[] = botData?.activeMarkets ?? [];
   const totalCapital = Number(riskData?.paperBalance ?? 10000);
-  const strategiesByMarket = useMemo(() => {
-    const result: Record<string, StrategyItem[]> = {};
-    if (!strategies) {
-      for (const market of MARKETS) {
-        result[market.id] = [];
-      }
-      return result;
-    }
-    for (const market of MARKETS) {
-      result[market.id] = strategies.filter((item) =>
-        item.supportedMarkets.includes(marketCategory(market.id) as any),
-      );
-    }
-    return result;
-  }, [strategies]);
+  const strategiesByMarket: Record<string, StrategyItem[]> = strategyData?.strategiesByMarket ?? {};
 
   function updateMarket(
     marketType: MarketId,
@@ -772,39 +761,7 @@ export function StrategySettings() {
                         <div className="mt-4 space-y-2">
                           {capitalCards.length > 0 ? (
                             capitalCards.map((item) => (
-                              <div
-                                key={item.strategyKey}
-                                className="rounded-2xl border border-gray-800 bg-gray-950/60 p-3"
-                              >
-                                <div className="flex items-center justify-between gap-2">
-                                  <p className="text-sm font-medium text-gray-100">
-                                    {item.strategyKey}
-                                  </p>
-                                  <StatusBadge
-                                    tone={
-                                      item.settings.priority === "HIGH"
-                                        ? "danger"
-                                        : item.settings.priority === "MEDIUM"
-                                          ? "warning"
-                                          : "neutral"
-                                    }
-                                  >
-                                    {item.settings.priority}
-                                  </StatusBadge>
-                                </div>
-                                <p className="mt-2 text-xs text-gray-500">
-                                  Per trade ₹
-                                  {item.perTradeCapital.toLocaleString(
-                                    "en-IN",
-                                    { maximumFractionDigits: 0 },
-                                  )}{" "}
-                                  · Max active ₹
-                                  {item.maxActiveCapital.toLocaleString(
-                                    "en-IN",
-                                    { maximumFractionDigits: 0 },
-                                  )}
-                                </p>
-                              </div>
+                              <CapitalCard key={item.strategyKey} item={item} />
                             ))
                           ) : (
                             <div className="rounded-2xl border border-dashed border-gray-800 bg-gray-950/40 px-4 py-8 text-center">
@@ -830,73 +787,18 @@ export function StrategySettings() {
                         </p>
                       </div>
                       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                        {(strategiesByMarket[market.id] ?? []).map(
-                          (strategy) => {
-                            const selected = config.strategyKeys.includes(
-                              strategy.strategyKey,
-                            );
-                            return (
-                              <button
-                                key={strategy.strategyKey}
-                                type="button"
-                                disabled={
-                                  isBotActiveHere ||
-                                  (!selected && config.strategyKeys.length >= 2)
-                                }
-                                onClick={() =>
-                                  toggleStrategy(
-                                    market.id,
-                                    strategy.strategyKey,
-                                  )
-                                }
-                                className={`rounded-2xl border p-4 text-left transition ${
-                                  selected
-                                    ? "border-brand-500/50 bg-brand-500/10"
-                                    : "border-gray-800 bg-gray-950/60 hover:border-gray-700"
-                                } disabled:cursor-not-allowed disabled:opacity-50`}
-                              >
-                                <div className="flex items-start justify-between gap-2">
-                                  <span className="text-sm font-medium text-gray-100">
-                                    {strategy.name}
-                                  </span>
-                                  <StatusBadge
-                                    tone={
-                                      strategy.riskLevel === "HIGH"
-                                        ? "danger"
-                                        : strategy.riskLevel === "MEDIUM"
-                                          ? "warning"
-                                          : "success"
-                                    }
-                                  >
-                                    {strategy.riskLevel}
-                                  </StatusBadge>
-                                </div>
-                                <p className="mt-2 text-xs text-gray-400">
-                                  {strategy.description}
-                                </p>
-                                <div className="mt-3 grid gap-1 text-[11px] text-gray-500">
-                                  <div>
-                                    Win rate{" "}
-                                    {strategy.historicalPerformance.winRate}%
-                                  </div>
-                                  <div>
-                                    Average return{" "}
-                                    {
-                                      strategy.historicalPerformance
-                                        .averageReturn
-                                    }
-                                    %
-                                  </div>
-                                  <div>
-                                    Max drawdown{" "}
-                                    {strategy.historicalPerformance.maxDrawdown}
-                                    %
-                                  </div>
-                                </div>
-                              </button>
-                            );
-                          },
-                        )}
+                        {(strategiesByMarket[market.id] ?? []).map((strategy) => {
+                          const selected = config.strategyKeys.includes(strategy.strategyKey)
+                          return (
+                            <StrategyCard
+                              key={strategy.strategyKey}
+                              strategy={strategy}
+                              selected={selected}
+                              disabled={isBotActiveHere || (!selected && config.strategyKeys.length >= 2)}
+                              onToggle={() => toggleStrategy(market.id, strategy.strategyKey)}
+                            />
+                          )
+                        })}
                       </div>
                     </div>
 
@@ -904,131 +806,18 @@ export function StrategySettings() {
                     {config.strategyKeys.length > 0 ? (
                       <div className="mt-5 space-y-4">
                         {config.strategyKeys.map((strategyKey) => {
-                          const settings =
-                            config.strategySettings[strategyKey] ??
-                            defaultStrategySettings();
+                          const settings = config.strategySettings[strategyKey] ?? defaultStrategySettings()
                           return (
-                            <div
+                            <PerStrategySettingsCard
                               key={strategyKey}
-                              className="rounded-3xl border border-gray-800 bg-gray-950/40 p-4"
-                            >
-                              <div className="flex items-center gap-2">
-                                <StatusBadge tone="neutral">
-                                  STRATEGY
-                                </StatusBadge>
-                                <p className="text-sm font-medium text-gray-200">
-                                  {strategyKey}
-                                </p>
-                              </div>
-                              <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                                <label className="space-y-1.5">
-                                  <span className="flex items-center gap-2 text-xs text-gray-500">
-                                    Priority
-                                    <InfoTip text="Higher-priority strategies can reserve room when capital is tight in AGGRESSIVE mode." />
-                                  </span>
-                                  <select
-                                    disabled={isBotActiveHere}
-                                    value={settings.priority}
-                                    onChange={(event) =>
-                                      updateMarket(market.id, (current) => ({
-                                        ...current,
-                                        strategySettings: {
-                                          ...current.strategySettings,
-                                          [strategyKey]: {
-                                            ...settings,
-                                            priority: event.target.value as
-                                              | "HIGH"
-                                              | "MEDIUM"
-                                              | "LOW",
-                                          },
-                                        },
-                                      }))
-                                    }
-                                    className="w-full rounded-xl border border-gray-800 bg-gray-900 px-3 py-2.5 text-sm text-gray-100"
-                                  >
-                                    <option value="HIGH">HIGH</option>
-                                    <option value="MEDIUM">MEDIUM</option>
-                                    <option value="LOW">LOW</option>
-                                  </select>
-                                </label>
-                                <NumberField
-                                  label="Cooldown after trade"
-                                  tip="Minimum wait time before this strategy can re-enter."
-                                  value={settings.cooldownAfterTradeSec}
-                                  min={0}
-                                  max={86400}
-                                  suffix="s"
-                                  disabled={isBotActiveHere}
-                                  onChange={(value) =>
-                                    updateMarket(market.id, (current) => ({
-                                      ...current,
-                                      strategySettings: {
-                                        ...current.strategySettings,
-                                        [strategyKey]: {
-                                          ...settings,
-                                          cooldownAfterTradeSec: value,
-                                        },
-                                      },
-                                    }))
-                                  }
-                                />
-                                <NumberField
-                                  label="Per trade %"
-                                  tip="Soft capital per entry. Effective order size is min(per-trade %, global max position size, available capital)."
-                                  value={
-                                    settings.capitalAllocation.perTradePercent
-                                  }
-                                  min={0.1}
-                                  max={100}
-                                  step={0.1}
-                                  suffix="%"
-                                  disabled={isBotActiveHere || !isAggressive}
-                                  onChange={(value) =>
-                                    updateMarket(market.id, (current) => ({
-                                      ...current,
-                                      strategySettings: {
-                                        ...current.strategySettings,
-                                        [strategyKey]: {
-                                          ...settings,
-                                          capitalAllocation: {
-                                            ...settings.capitalAllocation,
-                                            perTradePercent: value,
-                                          },
-                                        },
-                                      },
-                                    }))
-                                  }
-                                />
-                                <NumberField
-                                  label="Max active %"
-                                  tip="Upper exposure cap for this strategy while AGGRESSIVE mode is active."
-                                  value={
-                                    settings.capitalAllocation.maxActivePercent
-                                  }
-                                  min={0.1}
-                                  max={100}
-                                  step={0.1}
-                                  suffix="%"
-                                  disabled={isBotActiveHere || !isAggressive}
-                                  onChange={(value) =>
-                                    updateMarket(market.id, (current) => ({
-                                      ...current,
-                                      strategySettings: {
-                                        ...current.strategySettings,
-                                        [strategyKey]: {
-                                          ...settings,
-                                          capitalAllocation: {
-                                            ...settings.capitalAllocation,
-                                            maxActivePercent: value,
-                                          },
-                                        },
-                                      },
-                                    }))
-                                  }
-                                />
-                              </div>
-                            </div>
-                          );
+                              marketId={market.id}
+                              strategyKey={strategyKey}
+                              settings={settings}
+                              isBotActiveHere={isBotActiveHere}
+                              isAggressive={isAggressive}
+                              updateMarket={updateMarket}
+                            />
+                          )
                         })}
                       </div>
                     ) : null}

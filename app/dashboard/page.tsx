@@ -150,7 +150,11 @@ export default function DashboardPage() {
   const { data: strategyConfigData } = useQuery({
     queryKey: QUERY_KEYS.STRATEGY_CONFIGS,
     queryFn:  () => apiFetch<StrategyConfigListResponse>('/api/strategy-config'),
-    select: (d) => d,
+    select: (d) => {
+      const markets = d?.markets ?? []
+      const aggressiveMarkets = (markets ?? []).filter((m: any) => m.executionMode === 'AGGRESSIVE').map((m: any) => m.marketType)
+      return { ...d, aggressiveMarkets }
+    },
     staleTime: POLL_INTERVALS.STRATEGY,
   })
 
@@ -162,9 +166,7 @@ export default function DashboardPage() {
   const botActiveMarkets = botData?.activeMarkets ?? []
   const openTradeCount   = botData?.openTradeCount ?? 0
 
-  const aggressiveMarkets = (strategyConfigData?.markets ?? [])
-    .filter((m: any) => m.executionMode === 'AGGRESSIVE')
-    .map((m: any) => m.marketType)
+  const aggressiveMarkets = strategyConfigData?.aggressiveMarkets ?? []
 
   const pnlPositive = summary.totalPnl >= 0
   const winPositive = summary.winRate >= 50

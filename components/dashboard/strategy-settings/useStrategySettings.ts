@@ -6,13 +6,33 @@ import { POLL_INTERVALS } from '@/lib/polling-config'
 import { apiFetch } from '@/lib/api-client'
 
 type StrategyCatalogResponse = { strategies?: any[] }
+type StrategyCatalogSelected = StrategyCatalogResponse & { strategiesByMarket: Record<string, any[]> }
 type StrategyConfigDataResponse = { markets?: any[] }
 type RiskSettingsResponse = { paperBalance?: number }
 
 export function useStrategySettings() {
-  const { data: strategyData, isLoading: strategiesLoading } = useQuery<StrategyCatalogResponse>({
+  const { data: strategyData, isLoading: strategiesLoading } = useQuery<StrategyCatalogResponse, unknown, StrategyCatalogSelected>({
     queryKey: QUERY_KEYS.STRATEGY_CATALOG,
     queryFn: () => apiFetch('/api/strategies'),
+    select: (data) => {
+      const strategies = data?.strategies ?? []
+      const MARKET_MAP: Record<string, string> = {
+        crypto: 'CRYPTO',
+        indian: 'STOCKS',
+        global: 'STOCKS',
+        commodities: 'FOREX',
+      }
+      const strategiesByMarket: Record<string, any[]> = { crypto: [], indian: [], global: [], commodities: [] }
+      for (const s of strategies) {
+        const supported: string[] = s.supportedMarkets ?? []
+        for (const marketId of Object.keys(MARKET_MAP)) {
+          if (supported.includes(MARKET_MAP[marketId])) {
+            strategiesByMarket[marketId].push(s)
+          }
+        }
+      }
+      return { strategies, strategiesByMarket }
+    },
   })
 
   const { data: configData, isLoading: configsLoading } = useQuery<StrategyConfigDataResponse>({
