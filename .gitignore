@@ -105,3 +105,6 @@ __pycache__/
 *.py[cod]
 *.pyc
 *.pyo
+
+traces/
+scripts/
