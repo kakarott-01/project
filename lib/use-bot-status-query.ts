@@ -11,7 +11,6 @@ export function useBotStatusQuery(
     queryKey: BOT_STATUS_QUERY_KEY,
     queryFn: fetchBotStatus,
     // Reduce broad re-renders across subscribers by tracking changed props only
-    notifyOnChangeProps: ('tracked' as unknown as any),
     refetchInterval: (maybeDataOrQuery: any) => {
       const data: BotStatusSnapshot | undefined =
         maybeDataOrQuery && typeof maybeDataOrQuery.status === 'string'

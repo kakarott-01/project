@@ -93,7 +93,6 @@ export function BotControls() {
     queryKey: QUERY_KEYS.MARKET_MODES,
     queryFn:  () => apiFetch<ModeDataResponse>('/api/mode'),
     staleTime: POLL_INTERVALS.MARKET_MODES,
-    notifyOnChangeProps: ('tracked' as unknown as any),
   })
 
   const { data: strategyConfigData } = useQuery({
@@ -101,7 +100,6 @@ export function BotControls() {
     queryFn:  () => apiFetch<StrategyConfigDataResponse>('/api/strategy-config'),
     select: (d) => d,
     staleTime: POLL_INTERVALS.STRATEGY,
-    notifyOnChangeProps: ('tracked' as unknown as any),
   })
 
   const status:         string    = data?.status        ?? 'stopped'

@@ -65,7 +65,6 @@ export default function useTrades({ market = 'all', status = 'all', mode = 'all'
     queryFn:  () => apiFetch<TradesResponse>(`/api/trades?${buildParams(page)}`),
     staleTime: POLL_INTERVALS.BOT_IDLE,
     // Limit re-renders while paginated data updates or optimistic edits occur
-    notifyOnChangeProps: ('tracked' as unknown as any),
     placeholderData: (prev: any) => prev,
   })
 

@@ -31,6 +31,16 @@ export async function requireAccess() {
     throw createHttpError('Unauthorized', 401)
   }
 
+  // If `auth()` already computed `hasAccess`, trust that value and skip
+  // an extra DB lookup to avoid an additional round-trip per request.
+  if (typeof session.hasAccess === 'boolean') {
+    if (!session.hasAccess) {
+      throw createHttpError('Access denied', 403)
+    }
+
+    return session
+  }
+
   const user = await db.query.users.findFirst({
     where: eq(users.id, session.id),
     columns: { isWhitelisted: true },
