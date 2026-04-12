@@ -349,6 +349,21 @@ class BaseAlgo(ABC):
             if actual_notional <= risk_amount:
                 raise ValueError("Rounded quantity produced notional too small for a defined stop-loss")
             max_distance = risk_amount / actual_notional
+             # FIX: Cap SL distance to be safely inside the liquidation price.
+            # At leverage >= 5x, the naive risk-based SL (1/leverage) lands
+            # beyond or at the liquidation price (1/leverage - maint_margin),
+            # causing a ValueError every single time.
+            # Use 85% of the liquidation distance so SL always fires first.
+            MAINTENANCE_MARGIN_RATE = 0.005  # matches estimate_liquidation_price()
+            liq_dist_fraction = max((1.0 / leverage) - MAINTENANCE_MARGIN_RATE, 0.001)
+            safe_sl_cap = liq_dist_fraction * 0.85
+            if max_distance > safe_sl_cap:
+                logger.debug(
+                    "_build_level_plan: capping SL distance %.6f → %.6f "
+                    "(leverage=%dx, liq_dist=%.6f)",
+                    max_distance, safe_sl_cap, leverage, liq_dist_fraction,
+                )
+                max_distance = safe_sl_cap
             sl_distance = self._solve_fee_inclusive_stop_distance(
                 entry_price=entry_price,
                 quantity=quantity,

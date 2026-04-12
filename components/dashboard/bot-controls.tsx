@@ -200,9 +200,13 @@ export function BotControls() {
             ...base,
             status: "running",
             activeMarkets: nextActive,
-            // FIX 1: preserve existing started_at if bot was already running,
-            //         otherwise use the optimistic timestamp captured above
-            started_at: base.started_at ?? optimisticStartedAt,
+            // FIX: Only preserve started_at when the bot is ALREADY running/stopping.
+            // A stopped→running transition MUST use the fresh timestamp — the old
+            // started_at from the previous session would show a wrong elapsed time.
+            started_at:
+              base.status === "running" || base.status === "stopping"
+                ? (base.started_at ?? optimisticStartedAt)
+                : optimisticStartedAt,
           };
         },
       );
