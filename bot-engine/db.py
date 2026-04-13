@@ -142,6 +142,17 @@ def _round_pnl(value: float, places: int = 8) -> str:
 def _round_pct(value: float) -> str:
     return str(Decimal(str(value)).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
 
+def _serialize_metadata(metadata) -> "str | None":
+    """Serialize metadata dict to JSON string for asyncpg jsonb.
+    Uses default=str to handle datetime objects in _staged_open dicts."""
+    if metadata is None:
+        return None
+    if isinstance(metadata, dict):
+        return json.dumps(metadata, default=str)
+    return metadata
+
+
+
 
 # ── Database ──────────────────────────────────────────────────────────────────
 
@@ -1065,7 +1076,7 @@ class Database:
             str(stop_loss) if stop_loss is not None else None,
             str(take_profit) if take_profit is not None else None,
             str(fee_rate), algo_name, strategy_key, scope_key, session_ref or None,
-            metadata,
+            _serialize_metadata(metadata),
             datetime.utcnow(),
         )
         if row:
@@ -1131,7 +1142,7 @@ class Database:
             algo_name, strategy_key, scope_key, order_id,
             stop_loss_order_id,
             session_ref or None,
-            metadata,
+            _serialize_metadata(metadata),
             datetime.utcnow(),
         )
         if row:
