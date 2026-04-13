@@ -1747,7 +1747,7 @@ class BaseAlgo(ABC):
                 return quantity, False, f"Cooldown active for {cooldown_after_trade_sec - elapsed:.0f}s", {"cooldownRemaining": cooldown_after_trade_sec - elapsed}
 
         #if global_snapshot is None:
-        global_snapshot = await self.db.get_global_risk_snapshot(self.user_id)
+        # global_snapshot = await self.db.get_global_risk_snapshot(self.user_id)
 
         if self.execution_mode == "AGGRESSIVE" and self.strategy_key:
             capital_allocation = runtime_settings.get("capital_allocation", {})
