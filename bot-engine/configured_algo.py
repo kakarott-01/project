@@ -230,6 +230,7 @@ class ConfiguredMultiStrategyAlgo(LeverageMixin, BaseAlgo):
                     conf = score_confidence(df_latest, decision)
                     lev = leverage_from_score(conf)
                     if lev is None:
+                        self._discard_staged_open(symbol)
                         return None  # confidence too low
                     leverage = lev
                 except Exception as exc:
