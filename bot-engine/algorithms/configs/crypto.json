@@ -12,8 +12,8 @@
 
   "_comment_risk": "1% of balance risked per trade regardless of leverage",
   "risk_pct_per_trade": 1.0,
-  "stop_loss_pct": 100.0,
-  "take_profit_pct": 200.0,
+  "stop_loss_pct": 2.0,
+  "take_profit_pct": 4.0,
   "max_open_trades": 5,
   "daily_loss_limit_pct": 5.0,
 

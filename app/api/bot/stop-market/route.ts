@@ -78,13 +78,29 @@ async function _handleStopMarket(req: NextRequest, userId: string, marketType: s
     return NextResponse.json({ error: 'Bot is not running' }, { status: 409 })
   }
 
-  const activeMarkets = (current.activeMarkets as string[] ?? [])
+  const requestedMarketStillActive = () =>
+    sql`coalesce(${botStatuses.activeMarkets}, '[]'::jsonb) @> ${JSON.stringify([marketType])}::jsonb`
+  const now = new Date()
+
+  const [claimed] = await db.update(botStatuses)
+    .set({ updatedAt: now })
+    .where(and(
+      eq(botStatuses.userId, userId),
+      sql`${botStatuses.status} <> 'stopped'`,
+      requestedMarketStillActive(),
+    ))
+    .returning({ activeMarkets: botStatuses.activeMarkets })
+
+  if (!claimed) {
+    return NextResponse.json({ error: `${marketType} is not currently active` }, { status: 409 })
+  }
+
+  const activeMarkets = (claimed.activeMarkets as string[] ?? [])
   if (!activeMarkets.includes(marketType)) {
     return NextResponse.json({ error: `${marketType} is not currently active` }, { status: 409 })
   }
 
   const remainingMarkets = activeMarkets.filter((m) => m !== marketType)
-  const now = new Date()
 
   // Count open trades for this specific market
   const [openRows] = await db
@@ -106,7 +122,7 @@ async function _handleStopMarket(req: NextRequest, userId: string, marketType: s
 
   if (remainingMarkets.length === 0) {
     // Last market — do a full bot stop instead
-    await db
+    const stoppedRows = await db
       .update(botStatuses)
       .set({
         status: mode === 'close_all' ? 'stopping' as any : 'stopped' as any,
@@ -116,16 +132,30 @@ async function _handleStopMarket(req: NextRequest, userId: string, marketType: s
         stoppedAt: mode === 'close_all' ? null : now,
         updatedAt: now,
       })
-      .where(eq(botStatuses.userId, userId))
+      .where(and(
+        eq(botStatuses.userId, userId),
+        requestedMarketStillActive(),
+      ))
+      .returning({ id: botStatuses.id })
+    if (stoppedRows.length === 0) {
+      return NextResponse.json({ error: `${marketType} is not currently active` }, { status: 409 })
+    }
   } else {
     // Keep other markets running
-    await db
+    const updatedRows = await db
       .update(botStatuses)
       .set({
         activeMarkets: remainingMarkets,
         updatedAt: now,
       })
-      .where(eq(botStatuses.userId, userId))
+      .where(and(
+        eq(botStatuses.userId, userId),
+        requestedMarketStillActive(),
+      ))
+      .returning({ id: botStatuses.id })
+    if (updatedRows.length === 0) {
+      return NextResponse.json({ error: `${marketType} is not currently active` }, { status: 409 })
+    }
   }
 
   // Mark the session for this market as stopped

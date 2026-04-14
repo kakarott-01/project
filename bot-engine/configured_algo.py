@@ -151,6 +151,8 @@ class ConfiguredMultiStrategyAlgo(LeverageMixin, BaseAlgo):
                     "opened_at":   opened_at,
                     "leverage":    int(metadata.get("leverage", 1)) if isinstance(metadata, dict) else 1,
                     "confidence":  float(metadata.get("confidence", 50)) if isinstance(metadata, dict) else 50.0,
+                    "stop_loss":   float(open_row["stop_loss"]) if open_row.get("stop_loss") is not None else None,
+                    "take_profit": float(open_row["take_profit"]) if open_row.get("take_profit") is not None else None,
                 }
         except Exception as exc:
             logger.error("❌ Strategy DB sync failed for %s: %s", symbol, exc, exc_info=True)
@@ -245,25 +247,29 @@ class ConfiguredMultiStrategyAlgo(LeverageMixin, BaseAlgo):
     def _check_exit(self, symbol: str, close: float, decision: Optional[str]) -> Optional[str]:
         pos = self._open_positions[symbol]
         side = pos["signal"]
-        entry = pos["entry_price"]
         opened_at = pos["opened_at"]
-        leverage = pos.get("leverage", 1)
+        sl_price = pos.get("stop_loss")
+        tp_price = pos.get("take_profit")
 
-        sl_pct = float(self.risk.cfg.stop_loss_pct)
-        tp_pct = float(self.risk.cfg.take_profit_pct)
+        if tp_price:
+            tp_price = float(tp_price)
+            if (side == "BUY" and close >= tp_price) or (side == "SELL" and close <= tp_price):
+                self._set_exit_price_override(symbol, tp_price)
+                self._close(symbol)
+                return "BUY" if side == "SELL" else "SELL"
 
-        if side == "BUY":
-            price_pnl_pct = (close - entry) / entry * 100
-        else:
-            price_pnl_pct = (entry - close) / entry * 100
-
-        leveraged_pnl = price_pnl_pct * leverage
+        if sl_price:
+            sl_price = float(sl_price)
+            if (side == "BUY" and close <= sl_price) or (side == "SELL" and close >= sl_price):
+                self._set_exit_price_override(symbol, sl_price)
+                self._close(symbol)
+                return "BUY" if side == "SELL" else "SELL"
 
         reverse = (side == "BUY" and decision == "SELL") or \
                   (side == "SELL" and decision == "BUY")
         timed_out = (datetime.utcnow() - opened_at) > timedelta(hours=6)
 
-        if leveraged_pnl >= tp_pct or leveraged_pnl <= -sl_pct or reverse or timed_out:
+        if reverse or timed_out:
             self._close(symbol)
             return "BUY" if side == "SELL" else "SELL"
         return None

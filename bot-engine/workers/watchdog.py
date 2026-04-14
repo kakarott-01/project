@@ -96,7 +96,7 @@ class Watchdog:
                 # Grace expired with no heartbeat at all → treat as dead
             elif (now - ctx.last_heartbeat) < timeout:
                 # Active heartbeat within the timeout window
-                healthy_for = (now - ctx.started_at).total_seconds()
+                healthy_for = (now - ctx.last_restart_at).total_seconds()
                 if healthy_for >= HEALTHY_SUSTAIN_SECONDS:
                     self._restart_counts[user_id] = 0
                 logger.debug(

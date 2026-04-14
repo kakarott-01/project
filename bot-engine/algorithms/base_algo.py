@@ -766,6 +766,8 @@ class BaseAlgo(ABC):
         Returns True if a non-zero position or any open order exists for the
         symbol; False otherwise.
         """
+        position_check_failed = False
+        order_check_failed = False
         try:
             # Preferred: per-symbol positions (handles futures positions)
             pos = await self.connector.fetch_position_for_symbol(symbol)
@@ -774,6 +776,7 @@ class BaseAlgo(ABC):
                 if qty > 0:
                     return True
         except Exception as e:
+            position_check_failed = True
             logger.debug(f"⚠️  fetch_position_for_symbol failed for {symbol}: {e}")
 
         try:
@@ -782,13 +785,15 @@ class BaseAlgo(ABC):
             if orders:
                 return True
         except Exception as e:
+            order_check_failed = True
             logger.debug(f"⚠️  fetch_open_orders_checked failed for {symbol}: {e}")
-            try:
-                orders = await self.connector.fetch_open_orders(symbol)
-                if orders:
-                    return True
-            except Exception:
-                pass
+
+        if position_check_failed and order_check_failed:
+            logger.error(
+                f"[{self.name}] ❌ Both exchange checks failed for {symbol}. "
+                "Assuming PRESENT to prevent false orphan cancellation."
+            )
+            return True
 
         # Nothing found
         return False
@@ -803,15 +808,7 @@ class BaseAlgo(ABC):
             db_open: List[Dict] = await self.db.get_all_open_trades(
                 self.user_id, self.market_type, self.position_scope_key
             )
-            owned = (
-                [
-                    t for t in db_open
-                    if t.get("bot_session_ref") == self._session_ref
-                       or t.get("bot_session_ref") is None
-                ]
-                if self._session_ref
-                else db_open
-            )
+            owned = db_open
             exchange_symbols = set()
             if self.market_type in FUTURES_MARKETS:
                 exchange_positions = await self.connector.fetch_positions_checked()
@@ -887,20 +884,22 @@ class BaseAlgo(ABC):
             try:
                 exchange_symbols = set()
                 if self.market_type in FUTURES_MARKETS:
-                    exchange_positions = await self.connector.fetch_positions()
+                    exchange_positions = await self.connector.fetch_positions_checked()
                     exchange_symbols |= {
                         p.get("symbol", "")
                         for p in exchange_positions
                         if p.get("symbol")
                     }
-                exchange_orders = await self.connector.fetch_open_orders()
+                exchange_orders = await self.connector.fetch_open_orders_checked()
                 exchange_symbols |= {
                     o.get("symbol", "")
                     for o in exchange_orders
                     if o.get("symbol")
                 }
             except Exception as e:
-                logger.warning(f"[{self.name}] ⚠️  Exchange reconciliation fetch failed: {e}. Skipping.")
+                logger.warning(
+                    f"[{self.name}] ⚠️ Exchange API unavailable — skipping reconcile: {e}"
+                )
                 return
             fixed = 0
             for trade_ref in db_open_refs:
@@ -1600,6 +1599,20 @@ class BaseAlgo(ABC):
                 )
                 raise FatalExecutionError(f"STOP LOSS VERIFY FAILED for {symbol}")
 
+            stop_loss_order_id = order.get("stopLossOrderId") or None
+            if self.market_type in FUTURES_MARKETS and not stop_loss_order_id:
+                await self._emergency_flatten_position(
+                    symbol=symbol,
+                    side=signal,
+                    quantity=actual_quantity,
+                    reason=f"STOP LOSS ORDER ID MISSING for {symbol}",
+                )
+                logger.critical(
+                    f"[{self.name}] 💀 STOP LOSS ORDER ID MISSING for {symbol}; "
+                    "entry was flattened to avoid an untracked protected position."
+                )
+                raise FatalExecutionError(f"STOP LOSS ORDER ID MISSING for {symbol}")
+
             if staged is not None:
                 staged.update({
                     "entry_price": persisted_price,
@@ -1623,7 +1636,7 @@ class BaseAlgo(ABC):
                 stop_loss=actual_trade_plan["stop_loss"],
                 take_profit=actual_trade_plan["take_profit"],
                 order_id=order_id,
-                stop_loss_order_id=order.get("stopLossOrderId") or None,
+                stop_loss_order_id=stop_loss_order_id,
                 exposure_reservation_id=exposure_reservation_id,
             )
 

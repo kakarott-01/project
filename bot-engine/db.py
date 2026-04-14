@@ -74,6 +74,8 @@ def decrypt_field(ciphertext: str) -> Optional[str]:
 
 # ── Legacy decrypt alerting / automatic re-encryption helpers ───────────────
 LEGACY_DECRYPT_COUNT = 0
+LEGACY_REENCRYPT_FAILURES: Dict[str, int] = {}
+LEGACY_REENCRYPT_MAX_FAILURES = int(os.getenv("LEGACY_REENCRYPT_MAX_FAILURES", "3"))
 
 def _is_legacy_ciphertext(ct: Optional[str]) -> bool:
     """Return True if the ciphertext appears to be the legacy CryptoJS OpenSSL salted format."""
@@ -294,11 +296,29 @@ class Database:
                             LEGACY_DECRYPT_COUNT += 1
                             logger.info(f"🔁 Re-encrypted legacy exchange API for user={user_id} market={row['market_type']}")
                         except Exception as e:
-                            logger.error(f"❌ Failed to re-encrypt legacy API for user={user_id} market={row['market_type']}: {e}")
+                            failure_key = f"{user_id}:{row['market_type']}:{row['id']}"
+                            failure_count = LEGACY_REENCRYPT_FAILURES.get(failure_key, 0) + 1
+                            LEGACY_REENCRYPT_FAILURES[failure_key] = failure_count
+                            logger.critical(
+                                f"💀 Failed to re-encrypt legacy API for user={user_id} "
+                                f"market={row['market_type']} attempt={failure_count}: {e}",
+                                exc_info=True,
+                            )
+                            if failure_count >= LEGACY_REENCRYPT_MAX_FAILURES:
+                                raise RuntimeError(
+                                    f"Repeated legacy API re-encryption failures for user={user_id} "
+                                    f"market={row['market_type']}"
+                                ) from e
 
+                except RuntimeError:
+                    raise
                 except Exception:
-                    # Non-fatal detection error; continue loading the API entry
-                    pass
+                    logger.error(
+                        "❌ Legacy API re-encryption check failed for user=%s market=%s",
+                        user_id,
+                        row["market_type"],
+                        exc_info=True,
+                    )
 
                 result[row["market_type"]] = {
                     "exchange_name": row["exchange_name"],
@@ -710,7 +730,7 @@ class Database:
         async with pool.acquire() as conn:
             async with conn.transaction():
                 lock_acquired = await conn.fetchval(
-                    "SELECT pg_try_advisory_xact_lock(hashtext($1), hashtext($2))",
+                    "SELECT pg_try_advisory_xact_lock(('x' || md5($1 || $2))::bit(64)::bigint)",
                     user_id, market_type,
                 )
                 if not lock_acquired:
@@ -811,7 +831,7 @@ class Database:
         async with pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute(
-                    "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+                    "SELECT pg_advisory_xact_lock(('x' || md5($1 || $2))::bit(64)::bigint)",
                     user_id, market_type,
                 )
                 open_rows = await conn.fetch(

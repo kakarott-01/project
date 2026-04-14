@@ -342,6 +342,63 @@ export const failedLiveOrders = pgTable('failed_live_orders', {
   reviewIdx: index('failed_orders_review_idx').on(t.requiresManualReview, t.createdAt),
 }))
 
+// ─── Audit And Risk Events ───────────────────────────────────────────────────
+export const blockedTrades = pgTable('blocked_trades', {
+  id:               uuid('id').defaultRandom().primaryKey(),
+  userId:           uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  marketType:       marketTypeEnum('market_type').notNull(),
+  symbol:           varchar('symbol', { length: 50 }).notNull(),
+  side:             tradeSideEnum('side').notNull(),
+  strategyKey:      varchar('strategy_key', { length: 100 }),
+  positionScopeKey: varchar('position_scope_key', { length: 160 }),
+  reasonCode:       varchar('reason_code', { length: 80 }).notNull(),
+  reasonMessage:    text('reason_message').notNull(),
+  details:          jsonb('details'),
+  createdAt:        timestamp('created_at').defaultNow().notNull(),
+}, (t) => ({
+  userIdx:     index('blocked_trades_user_idx').on(t.userId, t.createdAt),
+  strategyIdx: index('blocked_trades_strategy_idx').on(t.userId, t.strategyKey, t.createdAt),
+}))
+
+export const riskEvents = pgTable('risk_events', {
+  id:          uuid('id').defaultRandom().primaryKey(),
+  userId:      uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  marketType:  marketTypeEnum('market_type'),
+  symbol:      varchar('symbol', { length: 50 }),
+  strategyKey: varchar('strategy_key', { length: 100 }),
+  eventType:   varchar('event_type', { length: 80 }).notNull(),
+  severity:    riskEventSeverityEnum('severity').default('warning').notNull(),
+  message:     text('message').notNull(),
+  payload:     jsonb('payload'),
+  createdAt:   timestamp('created_at').defaultNow().notNull(),
+}, (t) => ({
+  userIdx: index('risk_events_user_idx').on(t.userId, t.createdAt),
+  typeIdx: index('risk_events_type_idx').on(t.userId, t.eventType, t.createdAt),
+}))
+
+export const strategyPerformance = pgTable('strategy_performance', {
+  id:                    uuid('id').defaultRandom().primaryKey(),
+  userId:                uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  marketType:            marketTypeEnum('market_type').notNull(),
+  strategyId:            uuid('strategy_id').references(() => strategies.id, { onDelete: 'set null' }),
+  strategyKey:           varchar('strategy_key', { length: 100 }).notNull(),
+  totalTrades:           integer('total_trades').default(0).notNull(),
+  winningTrades:         integer('winning_trades').default(0).notNull(),
+  losingTrades:          integer('losing_trades').default(0).notNull(),
+  lossStreak:            integer('loss_streak').default(0).notNull(),
+  bestEquity:            decimal('best_equity', { precision: 20, scale: 8 }).default('0').notNull(),
+  openPositions:         integer('open_positions').default(0).notNull(),
+  realizedPnl:           decimal('realized_pnl', { precision: 20, scale: 8 }).default('0').notNull(),
+  unrealizedPnl:         decimal('unrealized_pnl', { precision: 20, scale: 8 }).default('0').notNull(),
+  maxDrawdownPct:        decimal('max_drawdown_pct', { precision: 8, scale: 4 }).default('0').notNull(),
+  lastBacktestReturnPct: decimal('last_backtest_return_pct', { precision: 10, scale: 4 }),
+  lastTradeAt:           timestamp('last_trade_at'),
+  lastHealthStatus:      varchar('last_health_status', { length: 30 }).default('healthy').notNull(),
+  updatedAt:             timestamp('updated_at').defaultNow().notNull(),
+}, (t) => ({
+  userMarketStrategyUq: uniqueIndex('strategy_performance_user_market_strategy_uq').on(t.userId, t.marketType, t.strategyKey),
+}))
+
 // ─── Algo Signals ─────────────────────────────────────────────────────────────
 export const algoSignals = pgTable('algo_signals', {
   id:                 uuid('id').defaultRandom().primaryKey(),
@@ -415,6 +472,9 @@ export const usersRelations = relations(users, ({ many, one }) => ({
   botSessions:        many(botSessions),
   positionCloseLogs:  many(positionCloseLog),
   failedLiveOrders:   many(failedLiveOrders),
+  blockedTrades:      many(blockedTrades),
+  riskEvents:         many(riskEvents),
+  strategyPerformance: many(strategyPerformance),
   riskStates:         many(riskState),
   reconciliationLogs: many(reconciliationLog),
   botStatus:          one(botStatuses,  { fields: [users.id], references: [botStatuses.userId] }),
@@ -451,6 +511,29 @@ export const positionCloseLogRelations = relations(positionCloseLog, ({ one }) =
   trade: one(trades, { fields: [positionCloseLog.tradeId], references: [trades.id] }),
 }))
 
+export const blockedTradesRelations = relations(blockedTrades, ({ one }) => ({
+  user: one(users, { fields: [blockedTrades.userId], references: [users.id] }),
+}))
+
+export const riskEventsRelations = relations(riskEvents, ({ one }) => ({
+  user: one(users, { fields: [riskEvents.userId], references: [users.id] }),
+}))
+
+export const strategyPerformanceRelations = relations(strategyPerformance, ({ one }) => ({
+  user: one(users, { fields: [strategyPerformance.userId], references: [users.id] }),
+  strategy: one(strategies, { fields: [strategyPerformance.strategyId], references: [strategies.id] }),
+}))
+
+export const tradeSpool = pgTable('trade_spool', {
+  id:         uuid('id').defaultRandom().primaryKey(),
+  userId:     uuid('user_id').notNull(),
+  payload:    jsonb('payload').notNull().$type<Record<string, unknown>>(),
+  retryCount: integer('retry_count').default(0).notNull(),
+  createdAt:  timestamp('created_at').defaultNow().notNull(),
+}, (t) => ({
+  userIdx: index('trade_spool_user_idx').on(t.userId),
+}))
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 export type User              = typeof users.$inferSelect
 export type NewUser           = typeof users.$inferInsert
@@ -472,7 +555,11 @@ export type BotSession        = typeof botSessions.$inferSelect
 export type NewBotSession     = typeof botSessions.$inferInsert
 export type PositionCloseLog  = typeof positionCloseLog.$inferSelect
 export type FailedLiveOrder   = typeof failedLiveOrders.$inferSelect
+export type BlockedTrade      = typeof blockedTrades.$inferSelect
+export type RiskEvent         = typeof riskEvents.$inferSelect
+export type StrategyPerformance = typeof strategyPerformance.$inferSelect
 export type RiskState         = typeof riskState.$inferSelect
 export type ReconciliationLog = typeof reconciliationLog.$inferSelect
 export type StopMode          = 'close_all' | 'graceful'
 export type BacktestRun       = typeof backtestRuns.$inferSelect
+export type TradeSpool        = typeof tradeSpool.$inferSelect
