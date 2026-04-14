@@ -769,15 +769,16 @@ class BaseAlgo(ABC):
         position_check_failed = False
         order_check_failed = False
         try:
-            # Preferred: per-symbol positions (handles futures positions)
-            pos = await self.connector.fetch_position_for_symbol(symbol)
+            # Preferred: per-symbol positions (handles futures positions).
+            # Use the checked variant so exchange API failures propagate.
+            pos = await self.connector.fetch_position_for_symbol_checked(symbol)
             if pos:
                 qty = _safe_float(pos.get("quantity") or pos.get("contracts") or pos.get("size") or pos.get("amount"))
                 if qty > 0:
                     return True
         except Exception as e:
             position_check_failed = True
-            logger.debug(f"⚠️  fetch_position_for_symbol failed for {symbol}: {e}")
+            logger.debug(f"⚠️  fetch_position_for_symbol_checked failed for {symbol}: {e}")
 
         try:
             # Next: any open orders for the symbol
@@ -836,11 +837,14 @@ class BaseAlgo(ABC):
                 symbol = trade["symbol"]
                 if symbol not in exchange_symbols:
                     # Before treating as orphan, perform a per-symbol verification
-                    try:
-                        present = await self._symbol_present_on_exchange(symbol)
-                    except Exception as e:
-                        logger.warning(f"[{self.name}] ⚠️  Per-symbol check failed for {symbol}: {e}")
-                        present = False
+                                try:
+                                    present = await self._symbol_present_on_exchange(symbol)
+                                except Exception as e:
+                                    logger.warning(f"[{self.name}] ⚠️  Per-symbol check failed for {symbol}: {e}")
+                                    # On per-symbol check errors assume the symbol is present to
+                                    # avoid false orphan cancellation when the exchange API
+                                    # is temporarily unavailable.
+                                    present = True
 
                     if present:
                         logger.info(f"[{self.name}] ℹ️  Symbol {symbol} present on exchange (detected by per-symbol check); skipping orphan cancel")
@@ -911,7 +915,9 @@ class BaseAlgo(ABC):
                         present = await self._symbol_present_on_exchange(symbol)
                     except Exception as e:
                         logger.warning(f"[{self.name}] ⚠️  Per-symbol runtime check failed for {symbol}: {e}")
-                        present = False
+                        # Same as startup reconcile: assume present on error to avoid
+                        # cancelling live trades when the exchange API is flaky.
+                        present = True
 
                     if present:
                         logger.info(f"[{self.name}] ℹ️  Runtime: symbol {symbol} present on exchange; skipping cancel")

@@ -1,7 +1,7 @@
 # Project TODO
 
 Update: reflect current tracked todo list and mark progress from the production audit.
-
+ 
 ## Todo List
 
 - [x] Validate DEFAULT_SYMBOLS at startup

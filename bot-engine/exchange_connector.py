@@ -422,6 +422,53 @@ class ExchangeConnector:
             }
         return None
 
+    async def fetch_position_for_symbol_checked(self, symbol: str) -> Optional[Dict]:
+        """
+        Same as `fetch_position_for_symbol` but uses the checked positions
+        API so that caller sees exchange errors instead of silent
+        fallbacks. Raises when the underlying positions fetch fails.
+        """
+        positions = await self.fetch_positions_checked(symbol)
+        for position in positions:
+            if position.get("symbol") != symbol:
+                continue
+            qty_raw = position.get("contracts")
+            if qty_raw is None:
+                qty_raw = position.get("size")
+            if qty_raw is None:
+                qty_raw = position.get("amount")
+            try:
+                quantity = abs(float(qty_raw or 0))
+            except Exception:
+                continue
+            if quantity <= 0:
+                continue
+            side = str(position.get("side") or "").lower()
+            if side not in ("buy", "sell"):
+                try:
+                    raw_signed_qty = float(qty_raw or 0)
+                    side = "buy" if raw_signed_qty > 0 else "sell"
+                except Exception:
+                    side = ""
+            entry_price = float(
+                position.get("entryPrice")
+                or position.get("average")
+                or position.get("avgPrice")
+                or position.get("markPrice")
+                or 0
+            )
+            liquidation_price = position.get("liquidationPrice")
+            return {
+                "symbol": symbol,
+                "quantity": quantity,
+                "side": side,
+                "entry_price": entry_price,
+                "liquidation_price": float(liquidation_price) if liquidation_price not in (None, "") else None,
+                "leverage": float(position.get("leverage") or 0) if position.get("leverage") not in (None, "") else None,
+                "raw": position,
+            }
+        return None
+
     def estimate_liquidation_price(
         self,
         entry_price: float,
