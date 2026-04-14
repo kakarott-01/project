@@ -818,8 +818,10 @@ class BaseAlgo(ABC):
     async def _reconcile_positions(self):
         if self._paper_mode:
             self._reconciled = True
+            self._reconcile_succeeded = True
             return
         logger.info(f"[{self.name}] 🔍 Starting startup reconciliation…")
+        self._reconcile_succeeded = False
         exchange_symbol_count = 0
         try:
             db_open: List[Dict] = await self.db.get_all_open_trades(
