@@ -13,7 +13,8 @@ import {
   TrendingDown,
   TrendingUp,
 } from "lucide-react";
-import { formatINR, formatPnl } from "@/lib/utils";
+import { formatPnl } from "@/lib/utils";
+import { getMarketCurrency, formatPnlAmount, formatAmount } from '@/lib/currency'
 import TradeRow from "@/components/dashboard/trade-row";
 
 export interface Trade {
@@ -222,7 +223,16 @@ export function TradesView({
       </div>
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
-        <StatCard label="Net P&L" value={formatPnl(summary.totalPnl)} sub={`all closed trades${typeof summary.totalFees === "number" ? ` - Fees ${formatINR(summary.totalFees)}` : ""}`} color={summary.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"} icon={summary.totalPnl >= 0 ? TrendingUp : TrendingDown} />
+        <StatCard
+          label="Net P&L"
+          value={market === 'all' ? 'N/A' : formatPnlAmount(summary.totalPnl, getMarketCurrency(market))}
+          sub={market === 'all'
+            ? 'Select a market type to view Net P&L'
+            : `all closed trades${typeof summary.totalFees === 'number' ? ` - Fees ${formatAmount(summary.totalFees, getMarketCurrency(market))}` : ''}`
+          }
+          color={market === 'all' ? 'text-gray-400' : (summary.totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}
+          icon={market === 'all' ? TrendingUp : (summary.totalPnl >= 0 ? TrendingUp : TrendingDown)}
+        />
         <StatCard label="Win Rate" value={`${summary.winRate}%`} sub={`${summary.closed} closed trades`} color={summary.winRate >= 50 ? "text-emerald-400" : "text-red-400"} icon={Activity} />
         <div className="col-span-2 lg:col-span-1">
           <StatCard label="Total Trades" value={summary.total.toLocaleString()} sub="matching current filters" color="text-gray-200" icon={Filter} />
@@ -280,7 +290,7 @@ export function TradesView({
                   <td colSpan={11} className="py-12 text-center text-sm text-gray-600">No trades match your filters</td>
                 </tr>
               ) : trades.map((trade) => (
-                <TradeRow key={trade.id} trade={trade} showCheckbox isChecked={selected.has(trade.id)} onToggle={onToggleOne} onDelete={onDeleteTrade} isBusy={isBusy} showMode />
+                <TradeRow key={trade.id} trade={trade} showCheckbox isChecked={selected.has(trade.id)} onToggle={onToggleOne} onDelete={onDeleteTrade} isBusy={isBusy} showMode showDetails />
               ))}
             </tbody>
           </table>

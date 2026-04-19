@@ -2,7 +2,8 @@
 
 import React from 'react'
 import type { Trade } from '@/components/dashboard/trade-table'
-import { getMarketCurrency, formatAmount } from '@/lib/currency'
+import { getMarketCurrency, formatAmount, formatPnlAmount } from '@/lib/currency'
+import { StatusBadge } from '@/components/ui/status-badge'
 import { format } from 'date-fns'
 import { ArrowUpRight, ArrowDownRight, Trash2, CheckSquare, Square } from 'lucide-react'
 
@@ -14,6 +15,7 @@ interface Props {
   onDelete?: (id: string) => void
   isBusy?: boolean
   showMode?: boolean
+  showDetails?: boolean
 }
 
 function TradeRow({
@@ -24,6 +26,7 @@ function TradeRow({
   onDelete,
   isBusy = false,
   showMode = false,
+  showDetails = false,
 }: Props) {
   const currency    = getMarketCurrency(trade.marketType, trade.symbol)
   // net P&L column removed for dashboard view; keep fee and amount calculations
@@ -70,6 +73,31 @@ function TradeRow({
         <div className="text-[11px] text-gray-600">qty {Number(trade.quantity ?? 0).toFixed(4)}</div>
       </td>
 
+      {/* Exit, Net P&L, Status - shown for trade-history / detailed views */}
+      {showDetails ? (
+        <>
+          <td className="py-2.5 px-2 text-xs text-gray-400 font-mono">
+            {trade.exitPrice != null ? formatAmount(Number(trade.exitPrice), currency) : '-'}
+          </td>
+
+          <td className="py-2.5 px-2 text-xs font-mono">
+            {trade.netPnl != null ? (
+              <span className={Number(trade.netPnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                {formatPnlAmount(Number(trade.netPnl), currency)}
+              </span>
+            ) : '-'}
+          </td>
+
+          <td className="py-2.5 px-2">
+            <StatusBadge tone={
+              trade.status === 'closed' ? 'success' :
+              trade.status === 'open' ? 'info' :
+              trade.status === 'pending' ? 'neutral' :
+              trade.status === 'cancelled' ? 'warning' : 'danger'
+            }>{trade.status}</StatusBadge>
+          </td>
+        </>
+      ) : null}
 
       {/* Mode (optional column) */}
       {showMode ? (

@@ -9,7 +9,8 @@ import {
   AlertTriangle, X, Activity, Filter, Download,
   TrendingUp, TrendingDown, RefreshCw, Bot,
 } from 'lucide-react'
-import { format} from 'date-fns'
+import { format } from 'date-fns'
+import { getMarketCurrency, formatPnlAmount } from '@/lib/currency'
 import dynamic from 'next/dynamic'
 import { useToastStore } from '@/lib/toast-store'
 import { formatElapsedDuration, getSessionDurationMs } from '@/lib/time'
@@ -171,6 +172,7 @@ const BotSessionRow = memo(function BotSessionRow({
   }, [session.status])
 
   const pnl = Number(session.totalPnl ?? 0)
+  const currency = getMarketCurrency(session.market)
   const duration = getDuration(session.started_at, session.stopped_at, now)
 
   return (
@@ -209,7 +211,7 @@ const BotSessionRow = memo(function BotSessionRow({
       </td>
       <td className="px-3 py-3.5 whitespace-nowrap">
         <span className={`text-xs font-semibold font-mono ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-          {pnl >= 0 ? '+' : ''}₹{Math.abs(pnl).toFixed(2)}
+          {formatPnlAmount(pnl, currency)}
         </span>
       </td>
       <td className="px-3 py-3.5 whitespace-nowrap"><StatusBadge status={session.status} /></td>
@@ -318,7 +320,7 @@ export default function BotHistoryPage() {
       </div>
 
       {/* Summary stat cards — fixed layout, no overlap */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
         <StatCard
           label="Total Sessions"
           value={pagination?.total ?? '—'}
@@ -337,12 +339,7 @@ export default function BotHistoryPage() {
           sub="this page"
           color="text-gray-100"
         />
-        <StatCard
-          label="Page P&L"
-          value={`₹${totalPnl.toFixed(2)}`}
-          sub="closed trades"
-          color={totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}
-        />
+        {/* Page P&L removed: per-session P&L is shown in table rows */}
       </div>
 
       {/* Filters */}
