@@ -187,29 +187,38 @@ export default function DashboardPage() {
         )}
       </div>
 
-      {/* Bot Controls — full width on its own row for clarity */}
-      <SectionErrorBoundary>
-        <BotControls />
-      </SectionErrorBoundary>
+      {/* ... previous code (Header and Stats row) ... */}
 
-      {/* Open Trades (active positions) */}
-      <div className="card flex flex-col gap-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-sm font-semibold text-gray-200">Open Positions</h2>
-            <p className="text-xs text-gray-500 mt-0.5">Currently open positions across all markets</p>
-          </div>
-          <a
-            href="/dashboard/trades"
-            className="flex items-center gap-1 text-xs text-brand-500 hover:text-brand-400 transition-colors font-medium"
-          >
-            View all
-            <ArrowUpRight className="w-3.5 h-3.5" />
-          </a>
+      {/* Main Content Area: Bot Controls & Open Positions */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 items-start">
+        
+        {/* Bot Controls — takes up 1 column (left side) on large screens */}
+        <div className="lg:col-span-1">
+          <SectionErrorBoundary>
+            <BotControls />
+          </SectionErrorBoundary>
         </div>
-        <SectionErrorBoundary>
-          <TradeTable trades={openTrades as Trade[]} compact />
-        </SectionErrorBoundary>
+
+        {/* Open Trades — takes up 2 columns (right side) on large screens */}
+        <div className="card flex flex-col gap-3 lg:col-span-2 min-h-full">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-200">Open Positions</h2>
+              <p className="text-xs text-gray-500 mt-0.5">Currently open positions across all markets</p>
+            </div>
+            <a
+              href="/dashboard/trades"
+              className="flex items-center gap-1 text-xs text-brand-500 hover:text-brand-400 transition-colors font-medium"
+            >
+              View all
+              <ArrowUpRight className="w-3.5 h-3.5" />
+            </a>
+          </div>
+          <SectionErrorBoundary>
+            <TradeTable trades={openTrades as Trade[]} compact />
+          </SectionErrorBoundary>
+        </div>
+
       </div>
 
     </div>
