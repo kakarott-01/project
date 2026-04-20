@@ -1,5 +1,5 @@
 {
-  "algo_name": "Crypto Confidence-Leverage Engine v5",
+  "algo_name": "Crypto Multi-Strategy v6",
   "enabled": true,
   "paper_mode": true,
   "quote_currency": "USDT",
@@ -8,26 +8,28 @@
   "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT"],
   "timeframe": "15m",
   "trend_timeframe": "4h",
-  "signal_cooldown_minutes": 5,
 
-  "_comment_risk": "1% of balance risked per trade regardless of leverage",
-  "risk_pct_per_trade": 1.0,
-  "stop_loss_pct": 2.0,
-  "take_profit_pct": 4.0,
+  "_comment_sizing": "5% of balance per trade. This is what actually drives position size — matches the Bot Settings Max Position Size slider.",
+  "risk_pct_per_trade": 5.0,
+
+  "_comment_cooldown": "15 minutes between signals on the same symbol to avoid overtrading.",
+  "signal_cooldown_minutes": 15,
+
+  "_comment_confidence": "Minimum confidence score to take any trade. 40 = 3× leverage tier minimum.",
+  "min_confidence": 40.0,
+
+  "_comment_strategy": "Priority order: EMA_TREND first (best quality), BREAKOUT second, MEAN_REVERT only in ranging markets.",
+  "strategy_order": ["EMA_TREND", "BREAKOUT", "MEAN_REVERT"],
+
   "max_open_trades": 5,
-  "daily_loss_limit_pct": 5.0,
+  "daily_loss_limit_pct": 10.0,
 
-  "_comment_confidence": "Lower threshold so more trades are approved",
-  "min_confidence": 25.0,
-
-  "_comment_scalp": "Enable scalp — fires in low-ATR ranging markets",
-  "scalp_enabled": true,
-
+  "_comment_sl_tp": "SL/TP controlled by Bot Settings sliders. Algorithm uses ATR-based levels, then takes min(ATR_SL, hard_limit_SL) and max(ATR_TP, hard_limit_TP). See base_algo_patches.md.",
   "exit_rules": {
-    "rsi_overbought_exit": 72,
-    "rsi_oversold_exit": 28,
+    "rsi_overbought_exit": 75,
+    "rsi_oversold_exit": 25,
     "use_tp_sl": true
   },
 
-  "notes": "v5: Added XRP/BNB, lowered min_confidence 40→25, enabled scalp, cooldown 15→5min, max_open_trades 3→5. Ranging + momentum sub-strategies now generate signals daily."
+  "notes": "v6: Three strategies (EMA Trend Pullback, Donchian Breakout, BB Mean Revert). ATR-based SL/TP merged with Bot Settings hard limits — tighter SL wins, wider TP wins. Trailing stop from Bot Settings toggle. risk_pct_per_trade=5.0 now matches Max Position Size slider. No arbitrary time limits."
 }

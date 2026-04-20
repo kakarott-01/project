@@ -392,8 +392,13 @@ class BaseAlgo(ABC):
                 fee_rate=fee_rate,
                 max_distance=max_distance,
             )
-            tp_pct = float(self.risk.cfg.take_profit_pct or 0.0)
-            tp_distance = max(0.0, (tp_pct / 100.0) * sl_distance)
+            # FIX: TP is a direct price-% from entry, NOT a fraction of SL distance.
+            # e.g. TP=5%, leverage=5×: price moves 5% → P&L = 5%×5 = 25% on margin.
+            tp_distance = max(0.0, float(self.risk.cfg.take_profit_pct or 0.0) / 100.0)
+            # FIX: Hard SL from Bot Settings caps the risk-budget SL (tighter wins).
+            _hard_sl_fraction = float(self.risk.cfg.stop_loss_pct or 0.0) / 100.0
+            if _hard_sl_fraction > 0 and sl_distance > _hard_sl_fraction:
+                sl_distance = _hard_sl_fraction
         else:
             configured_distance = float(self.risk.cfg.stop_loss_pct or 0.0) / 100.0
             sl_distance = self._solve_fee_inclusive_stop_distance(
@@ -1340,6 +1345,33 @@ class BaseAlgo(ABC):
                         return
 
                 staged = getattr(self, "_staged_open", {}).get(symbol, {})
+
+                # ── Merge algorithm ATR levels with hard-limit plan levels ────────
+                # New algorithms store ATR-based SL/TP in staged_open via _stage_open.
+                # Rule: tighter SL wins; wider TP wins. Hard limits from Bot Settings
+                # are enforced by _build_level_plan (Patch 1), so plan_sl/tp already
+                # respect those. The merge below lets tighter ATR stops prevail.
+                _algo_sl = staged.get("stop_loss") if staged else None
+                _algo_tp = staged.get("take_profit") if staged else None
+                _plan_sl = trade_plan["stop_loss"]
+                _plan_tp = trade_plan["take_profit"]
+
+                if _algo_sl is not None and _algo_tp is not None and _plan_sl and _plan_tp:
+                    if signal == "BUY":
+                        _final_sl = max(float(_algo_sl), float(_plan_sl))   # higher = closer = tighter
+                        _final_tp = max(float(_algo_tp), float(_plan_tp))   # higher = farther  = wider
+                    else:
+                        _final_sl = min(float(_algo_sl), float(_plan_sl))   # lower  = closer = tighter
+                        _final_tp = min(float(_algo_tp), float(_plan_tp))   # lower  = farther  = wider
+                else:
+                    _final_sl = _plan_sl
+                    _final_tp = _plan_tp
+
+                # Propagate merged levels back so _execute_live_trade places the
+                # exchange SL order at the correct price.
+                trade_plan["stop_loss"]   = _final_sl
+                trade_plan["take_profit"] = _final_tp
+
                 if staged is not None:
                     staged.update({
                         "entry_price": price,
@@ -1349,13 +1381,12 @@ class BaseAlgo(ABC):
                         "notional": trade_plan["actual_notional"],
                         "sl_distance": trade_plan["sl_distance"],
                         "tp_distance": trade_plan["tp_distance"],
-                        "stop_loss": trade_plan["stop_loss"],
-                        "take_profit": trade_plan["take_profit"],
+                        "stop_loss": _final_sl,
+                        "take_profit": _final_tp,
                         "liquidation_price": trade_plan["liquidation_price"] or None,
                     })
 
                 await self.db.save_signal(self.user_id, self.name, self.market_type, symbol, signal)
-
                 if self._paper_mode:
                     trade_id = await self.db.save_paper_trade(
                         self.user_id, symbol, signal, quantity,
@@ -1717,7 +1748,12 @@ class BaseAlgo(ABC):
 
             stop_order_id = order.get("stopLossOrderId")
             provisional_stop_error = order.get("stopLossAttachError")
-            stop_tolerance = max(abs(actual_trade_plan["stop_loss"]) * 0.002, 1e-8)
+            # Override actual_trade_plan SL/TP with the merged values from
+            # _process_symbol (Patch 2) so the stop-refresh check and staged-open
+            # update both use the correct ATR + hard-limit levels.
+            actual_trade_plan["stop_loss"]   = sl   # already merged by _process_symbol
+            actual_trade_plan["take_profit"] = tp   # already merged by _process_symbol
+            stop_tolerance = max(abs(sl) * 0.002, 1e-8)
             stop_needs_refresh = (
                 provisional_stop_error is not None
                 or stop_order_id is None

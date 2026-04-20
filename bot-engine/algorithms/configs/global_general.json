@@ -1,31 +1,18 @@
 {
-  "algo_name": "Universal Trend Follower",
+  "algo_name": "Global Multi-Strategy v3",
   "enabled": true,
   "paper_mode": true,
   "quote_currency": "USDT",
   "fee_rate": 0.001,
+
   "symbols": ["BTC/USDT", "ETH/USDT"],
   "timeframe": "1h",
-  "stop_loss_pct": 2.0,
-  "take_profit_pct": 4.0,
-  "indicators": {
-    "ema_fast": {
-      "period": 50
-    },
-    "ema_slow": {
-      "period": 200
-    },
-    "rsi": {
-      "period": 14,
-      "buy_zone_low": 40,
-      "buy_zone_high": 55,
-      "sell_zone_low": 45,
-      "sell_zone_high": 60
-    }
-  },
-  "exit_rules": {
-    "time_limit_hours": 24,
-    "use_tp_sl": true
-  },
-  "notes": "Universal swing algo. EMA 50/200 regime filter on 1h. RSI pullback entry. Wider TP/SL for longer holds. 24h time limit. Restart-safe: restores open positions from DB."
+
+  "_comment_sizing": "5% of balance per trade — matches Bot Settings Max Position Size slider.",
+  "risk_pct_per_trade": 5.0,
+
+  "_comment_strategies": "1) EMA 200 Pullback — EMA200 trend, enter on EMA50 pullback with RSI 40-60. 2) RSI-2 Mean Revert — Larry Connors strategy, RSI(2) < 5 in uptrend / > 95 in downtrend.",
+  "_comment_sl_tp": "SL = min(2×ATR, Bot Settings SL%). TP = max(4×ATR, Bot Settings TP%). Trailing stop if enabled in Bot Settings.",
+
+  "notes": "v3: EMA200 Pullback + RSI-2 Mean Reversion (Connors). ATR-based SL/TP with hard limits. No time-limit exits. RSI-2 trades exit quickly once RSI normalises to 70/30."
 }

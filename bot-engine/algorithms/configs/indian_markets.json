@@ -1,35 +1,25 @@
 {
-  "algo_name": "EMA Crossover + RSI + Volume v2",
+  "algo_name": "Indian Markets Multi-Strategy v3",
   "enabled": true,
   "paper_mode": true,
   "quote_currency": "INR",
   "fee_rate": 0.0003,
-  "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "WIPRO", "AXISBANK"],
+
+  "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "WIPRO", "AXISBANK", "SBIN", "LT", "MARUTI"],
   "timeframe": "5m",
-  "stop_loss_pct": 0.8,
-  "take_profit_pct": 1.5,
-  "indicators": {
-    "ema_fast": { "period": 9 },
-    "ema_slow": { "period": 21 },
-    "rsi": {
-      "period": 14,
-      "buy_threshold": 48,
-      "sell_threshold": 52
-    },
-    "volume": {
-      "avg_period": 20,
-      "spike_multiplier": 1.2
-    }
-  },
+
+  "_comment_sizing": "5% of balance per trade — matches Bot Settings Max Position Size slider.",
+  "risk_pct_per_trade": 5.0,
+
   "trading_hours": {
-    "start": "09:20",
-    "end": "15:15",
-    "square_off": "15:15",
-    "no_trade_first_minutes": 5
+    "start": "09:15",
+    "orb_end": "09:45",
+    "no_new_entries_after": "15:10",
+    "square_off": "15:15"
   },
-  "exit_rules": {
-    "square_off_eod": true,
-    "use_tp_sl": true
-  },
-  "notes": "v2: Added WIPRO + AXISBANK. RSI threshold relaxed 50→48/52. Volume spike 1.5×→1.2×. 7 symbols increases daily opportunity from 5 to 7+ trades."
+
+  "_comment_strategies": "1) Opening Range Breakout (ORB) — first 30 min sets range, trade the breakout. 2) Supertrend + MACD — both indicators must agree.",
+  "_comment_sl_tp": "SL = min(1.5×ATR, Bot Settings SL%). TP = max(3.0×ATR, Bot Settings TP%). Trailing stop if enabled in Bot Settings.",
+
+  "notes": "v3: ORB strategy (professional Indian intraday method) + Supertrend/MACD. ATR-based SL/TP with hard limits from Bot Settings. No time-limit exits. EOD square-off at 15:15 still active."
 }

@@ -1,31 +1,23 @@
 {
-  "algo_name": "VWAP + MACD Crossover",
+  "algo_name": "Commodities Multi-Strategy v3",
   "enabled": true,
   "paper_mode": true,
   "quote_currency": "INR",
   "fee_rate": 0.0004,
+
   "symbols": ["GOLD", "SILVER", "CRUDEOIL", "NATURALGAS"],
   "timeframe": "15m",
-  "stop_loss_pct": 1.0,
-  "take_profit_pct": 2.0,
-  "indicators": {
-    "macd": {
-      "fast": 12,
-      "slow": 26,
-      "signal": 9
-    },
-    "vwap": {
-      "enabled": true,
-      "period": "day"
-    }
-  },
+
+  "_comment_sizing": "5% of balance per trade — matches Bot Settings Max Position Size slider.",
+  "risk_pct_per_trade": 5.0,
+
   "trading_hours": {
     "start": "09:00",
     "end": "23:25"
   },
-  "exit_rules": {
-    "time_limit_hours": 4,
-    "use_tp_sl": true
-  },
-  "notes": "MACD crossover above/below VWAP. Bullion trades 9AM-11:30PM IST, energy has different hours — check MCX schedule. TP/SL + 4h time limit exits. Restart-safe: restores open positions from DB."
+
+  "_comment_strategies": "1) Bollinger Squeeze Breakout — low-volatility compression then expansion. 2) VWAP + MACD Momentum — price above/below VWAP with MACD cross confirmation.",
+  "_comment_sl_tp": "SL = min(2×ATR, Bot Settings SL%). TP = max(3.5×ATR, Bot Settings TP%). Trailing stop if enabled in Bot Settings.",
+
+  "notes": "v3: BB Squeeze Breakout + VWAP/MACD Momentum. ATR-based SL/TP with hard limits. No arbitrary time limits. Works on MCX bullion (09:00-23:30 IST) and energy (09:00-23:55 IST) — check MCX schedule."
 }
