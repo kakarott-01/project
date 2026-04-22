@@ -188,11 +188,13 @@ class ConfiguredMultiStrategyAlgo(LeverageMixin, BaseAlgo):
         for strategy_key in self._strategy_keys:
             timeframe = strategy_default_timeframe(strategy_key)
             df = await self.connector.fetch_ohlcv_cached(symbol, timeframe, limit=160)
-            if len(df) < 80:
+            if len(df) < 81:
                 votes.append(None)
                 continue
-            latest_close = float(df["close"].iloc[-1])
-            votes.append(self._executor.evaluate_strategy(df, strategy_key))
+            # FIX C-1: Drop forming candle
+            df_closed = df.iloc[:-1]
+            latest_close = float(df_closed["close"].iloc[-1])
+            votes.append(self._executor.evaluate_strategy(df_closed, strategy_key))
 
         if latest_close is None:
             return None, None
@@ -229,7 +231,9 @@ class ConfiguredMultiStrategyAlgo(LeverageMixin, BaseAlgo):
                         strategy_default_timeframe(self._strategy_keys[0]),
                         limit=250,
                     )
-                    conf = score_confidence(df_latest, decision)
+                    # FIX C-1: Use closed candles for confidence scoring
+                    df_latest_closed = df_latest.iloc[:-1]
+                    conf = score_confidence(df_latest_closed, decision)
                     lev = leverage_from_score(conf)
                     if lev is None:
                         self._discard_staged_open(symbol)

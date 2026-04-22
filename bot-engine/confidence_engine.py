@@ -48,12 +48,15 @@ def score_confidence(df: pd.DataFrame, signal: Signal) -> float:
     Requires at least 210 rows (for EMA200 stability).
     Returns 0.0 if the DataFrame is too short.
     """
-    if len(df) < 210:
+    if len(df) < 211:
         logger.debug("confidence_engine: too few rows (%d)", len(df))
         return 0.0
 
+    # FIX C-1: Drop the forming candle — confidence must be based on closed bars only
+    df_closed = df.iloc[:-1]
+
     try:
-        return _compute_confidence(df, signal)
+        return _compute_confidence(df_closed, signal)
     except Exception as exc:
         logger.warning("confidence_engine: error computing score: %s", exc, exc_info=True)
         return 0.0
@@ -69,13 +72,14 @@ def leverage_from_score(score: float) -> Optional[int]:
       >= 40  →  3×
        < 40  →  None  (no trade)
     """
-    if score >= 80:
+    # FIX M-6: Added 2-point buffers to prevent 43% leverage jump at boundary
+    if score >= 82:
         return 10
-    if score >= 65:
+    if score >= 67:
         return 7
-    if score >= 50:
+    if score >= 52:
         return 5
-    if score >= 40:
+    if score >= 42:
         return 3
     return None  # confidence too low — skip trade
 

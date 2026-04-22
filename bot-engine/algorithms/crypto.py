@@ -319,8 +319,12 @@ class CryptoAlgo(BaseAlgo):
             logger.error("❌ OHLCV %s: %s", symbol, e)
             return None
 
-        if len(df) < 60 or len(df_4h) < 50:
+        if len(df) < 61 or len(df_4h) < 51:
             return None
+
+        # FIX C-1: Drop the forming (live) candle — only compute on closed bars
+        df = df.iloc[:-1]
+        df_4h = df_4h.iloc[:-1]
 
         ind = _compute(df, df_4h)
         if ind is None:

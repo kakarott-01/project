@@ -870,6 +870,17 @@ class BaseAlgo(ABC):
             for trade in owned:
                 symbol = trade["symbol"]
                 if symbol not in exchange_symbols:
+                    # FIX M-2: Grace period — skip orphan check for recently opened trades.
+                    # Exchange position APIs can lag 30-90s after order fill.
+                    trade_age_seconds = (datetime.utcnow() - trade["opened_at"]).total_seconds()
+                    if trade_age_seconds < 120:
+                        logger.info(
+                            "[%s] Skipping orphan check for %s (age=%ds < 120s grace)",
+                            self.name, symbol, int(trade_age_seconds),
+                        )
+                        exchange_symbols.add(symbol)
+                        continue
+
                     # Before treating as orphan, perform a per-symbol verification
                     try:
                         present = await self._symbol_present_on_exchange(symbol)
@@ -946,6 +957,17 @@ class BaseAlgo(ABC):
                 symbol = trade_ref["symbol"]
                 trade_id = trade_ref["id"]
                 if symbol not in exchange_symbols:
+                    # FIX M-2: Grace period for runtime reconcile too
+                    opened_at = trade_ref.get("opened_at")
+                    if opened_at:
+                        trade_age_seconds = (datetime.utcnow() - opened_at).total_seconds()
+                        if trade_age_seconds < 120:
+                            logger.info(
+                                "[%s] Runtime: skipping orphan check for %s (age=%ds)",
+                                self.name, symbol, int(trade_age_seconds),
+                            )
+                            continue
+
                     # Try per-symbol verification before cancelling
                     try:
                         present = await self._symbol_present_on_exchange(symbol)
@@ -1129,7 +1151,10 @@ class BaseAlgo(ABC):
             margin_in_use = 0.0
             for t in open_trades:
                 meta = t.get("metadata") or {}
-                lev = int(meta.get("leverage", 1)) if isinstance(meta, dict) else 1
+                # FIX H-2: Explicit None check + safety cap so old trades without
+                # leverage metadata don't consume 10× too much paper balance
+                lev = int(meta.get("leverage") or 1) if isinstance(meta, dict) else 1
+                lev = max(1, min(lev, 125))
                 entry = float(t.get("entry_price", 0))
                 qty = float(t.get("remaining_quantity") or t.get("quantity") or 0)
                 margin_in_use += (entry * qty) / max(lev, 1)

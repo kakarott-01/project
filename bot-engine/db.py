@@ -1312,14 +1312,14 @@ class Database:
         pool = await self.pool()
         if position_scope_key:
             rows = await pool.fetch(
-                """SELECT id::text, symbol, position_scope_key
+                """SELECT id::text, symbol, position_scope_key, opened_at
                    FROM trades
                    WHERE user_id=$1 AND market_type=$2 AND position_scope_key=$3 AND status='open'""",
                 user_id, market_type, position_scope_key,
             )
         else:
             rows = await pool.fetch(
-                """SELECT id::text, symbol, position_scope_key
+                """SELECT id::text, symbol, position_scope_key, opened_at
                    FROM trades
                    WHERE user_id=$1 AND market_type=$2 AND status='open'""",
                 user_id, market_type,

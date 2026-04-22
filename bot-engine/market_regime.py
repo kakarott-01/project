@@ -52,12 +52,15 @@ def detect_market_regime(df: pd.DataFrame) -> MarketRegime:
       - Price oscillates above/below EMA50
       - ATR relatively low/flat
     """
-    if len(df) < 210:
+    if len(df) < 211:
         logger.debug("market_regime: insufficient data (%d rows), defaulting RANGING", len(df))
         return "RANGING"
 
+    # FIX C-1: Drop forming candle before regime detection
+    df_closed = df.iloc[:-1]
+
     try:
-        return _evaluate_regime(df)
+        return _evaluate_regime(df_closed)
     except Exception as exc:
         logger.warning("market_regime: error during detection: %s", exc, exc_info=True)
         return "RANGING"
